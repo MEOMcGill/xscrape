@@ -85,6 +85,7 @@ async def main():
     # get user by login
     user_login = "xdevelopers"
     await api.user_by_login(user_login)  # User
+    await api.user_about(user_login)  # dict with about profile info
 
     # user info
     user_id = 2244994945

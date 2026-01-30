@@ -186,6 +186,7 @@ def run():
     c_lim("retweeters", "Get retweeters of a tweet", "tweet_id", "Tweet ID", int)
     c_one("user_by_id", "Get user data by ID", "user_id", "User ID", int)
     c_one("user_by_login", "Get user data by username", "username", "Username")
+    c_one("user_about", "Get about info for username", "username", "Username")
     c_lim("following", "Get user following", "user_id", "User ID", int)
     c_lim("followers", "Get user followers", "user_id", "User ID", int)
     # https://x.com/xDaily/status/1701694747767648500

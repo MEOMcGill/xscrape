@@ -81,6 +81,43 @@ class TextLink(JSONTrait):
 
 
 @dataclass
+class AccountAbout(JSONTrait):
+    screen_name: str
+    name: str
+    rest_id: int
+    account_based_in: str | None
+    location_accurate: bool | None
+    affiliate_username: str | None
+    source: str | None
+    username_changes: int | None
+    username_last_changed_at: int | None
+    is_identity_verified: bool | None
+    verified_since_msec: int | None
+
+    @staticmethod
+    def parse(obj: dict):
+        about = obj.get("about_profile") or {}
+        core = obj.get("core") or {}
+        username_changes = about.get("username_changes", {}).get("count")
+        username_last_changed = about.get("username_changes", {}).get("last_changed_at_msec")
+        verification = obj.get("verification_info", {}) or {}
+        reason = verification.get("reason", {}) or {}
+        return AccountAbout(
+            screen_name=core.get("screen_name", ""),
+            name=core.get("name", ""),
+            rest_id=int_or(obj.get("rest_id")),
+            account_based_in=about.get("account_based_in"),
+            location_accurate=about.get("location_accurate"),
+            affiliate_username=about.get("affiliate_username"),
+            source=about.get("source"),
+            username_changes=int(username_changes) if username_changes is not None else None,
+            username_last_changed_at=int(username_last_changed) if username_last_changed is not None else None,
+            is_identity_verified=verification.get("is_identity_verified"),
+            verified_since_msec=int(reason.get("verified_since_msec")) if reason.get("verified_since_msec") else None,
+        )
+
+
+@dataclass
 class UserRef(JSONTrait):
     id: int
     id_str: str
@@ -797,6 +834,18 @@ def parse_trend(rep: httpx.Response) -> Trend | None:
         return None
     except Exception as e:
         logger.error(f"Failed to parse trend - {type(e)}:\n{traceback.format_exc()}")
+        return None
+
+
+def parse_about(rep: httpx.Response | dict) -> AccountAbout | None:
+    try:
+        res = rep if isinstance(rep, dict) else rep.json()
+        obj = get_or(res, "data.user_result_by_screen_name.result")
+        if not obj:
+            return None
+        return AccountAbout.parse(obj)
+    except Exception as e:
+        logger.error(f"Failed to parse about profile - {type(e)}:\n{traceback.format_exc()}")
         return None
 
 
