@@ -102,18 +102,29 @@ class AccountAbout(JSONTrait):
         username_last_changed = about.get("username_changes", {}).get("last_changed_at_msec")
         verification = obj.get("verification_info", {}) or {}
         reason = verification.get("reason", {}) or {}
+        verified_since = reason.get("verified_since_msec")
+
+        # Required fields
+        screen_name = get_required(obj, core, "screen_name")
+        name = get_required(obj, core, "name")
+        rest_id_val = int_or(obj, "rest_id")
+        if rest_id_val is None:
+            raise KeyError(f"Required field 'rest_id' not found for item {screen_name}")
+
         return AccountAbout(
-            screen_name=core.get("screen_name", ""),
-            name=core.get("name", ""),
-            rest_id=int_or(obj.get("rest_id")),
+            screen_name=screen_name,
+            name=name,
+            rest_id=rest_id_val,
             account_based_in=about.get("account_based_in"),
             location_accurate=about.get("location_accurate"),
             affiliate_username=about.get("affiliate_username"),
             source=about.get("source"),
             username_changes=int(username_changes) if username_changes is not None else None,
-            username_last_changed_at=int(username_last_changed) if username_last_changed is not None else None,
+            username_last_changed_at=int(username_last_changed)
+            if username_last_changed is not None
+            else None,
             is_identity_verified=verification.get("is_identity_verified"),
-            verified_since_msec=int(reason.get("verified_since_msec")) if reason.get("verified_since_msec") else None,
+            verified_since_msec=int(verified_since) if verified_since is not None else None,
         )
 
 
@@ -129,8 +140,8 @@ class UserRef(JSONTrait):
     def parse(obj: dict):
         # Handle new nested structure where fields may be in 'core'
         core = obj.get("core") or {}
-        screen_name = core.get("screen_name") or obj.get("screen_name")
-        name = core.get("name") or obj.get("name")
+        screen_name = get_required(obj, core, "screen_name")
+        name = get_required(obj, core, "name")
 
         return UserRef(
             id=int(obj["id_str"]),
@@ -176,21 +187,23 @@ class User(JSONTrait):
         core = obj.get("core") or {}
         legacy = obj.get("legacy") or {}
 
-        # Fields can be in either old location (top-level) or new location (core/legacy)
-        screen_name = core.get("screen_name") or obj.get("screen_name")
-        name = core.get("name") or obj.get("name")
-        created_at = core.get("created_at") or obj.get("created_at")
+        # Required fields can be in either old location (top-level) or new location (core/legacy)
+        screen_name = get_required(obj, core, "screen_name")
+        name = get_required(obj, core, "name")
+        created_at = get_required(obj, core, "created_at")
 
-        # Most other fields moved to 'legacy', fallback to top-level for old format
-        description = legacy.get("description") or obj.get("description")
-        followers_count = legacy.get("followers_count") or obj.get("followers_count")
-        friends_count = legacy.get("friends_count") or obj.get("friends_count")
-        statuses_count = legacy.get("statuses_count") or obj.get("statuses_count")
-        favourites_count = legacy.get("favourites_count") or obj.get("favourites_count")
-        listed_count = legacy.get("listed_count") or obj.get("listed_count")
-        media_count = legacy.get("media_count") or obj.get("media_count")
-        location = legacy.get("location") or obj.get("location")
-        profile_image_url = legacy.get("profile_image_url_https") or obj.get("profile_image_url_https")
+        # Most other required fields moved to 'legacy', fallback to top-level for old format
+        description = get_required(obj, legacy, "description")
+        followers_count = get_required(obj, legacy, "followers_count")
+        friends_count = get_required(obj, legacy, "friends_count")
+        statuses_count = get_required(obj, legacy, "statuses_count")
+        favourites_count = get_required(obj, legacy, "favourites_count")
+        listed_count = get_required(obj, legacy, "listed_count")
+        media_count = get_required(obj, legacy, "media_count")
+        location = get_required(obj, legacy, "location")
+        profile_image_url = get_required(obj, legacy, "profile_image_url_https")
+
+        # Optional fields
         profile_banner_url = legacy.get("profile_banner_url") or obj.get("profile_banner_url")
         verified = legacy.get("verified") or obj.get("verified")
         protected = legacy.get("protected") or obj.get("protected")
@@ -222,7 +235,9 @@ class User(JSONTrait):
             blue=blue,
             blueType=blue_type,
             protected=protected,
-            descriptionLinks=_parse_links({"entities": entities}, ["entities.description.urls", "entities.url.urls"]),
+            descriptionLinks=_parse_links(
+                {"entities": entities}, ["entities.description.urls", "entities.url.urls"]
+            ),
             pinnedIds=[int(x) for x in pinned_ids],
         )
 
@@ -731,6 +746,16 @@ def _parse_links(obj: dict, paths: list[str]):
     links = [x for x in links if x is not None]
 
     return links
+
+
+def get_required(obj: dict, core: dict, key: str):
+    """Get value from core or obj, raise KeyError if missing in both"""
+    value = core.get(key) or obj.get(key)
+    if value is None:
+        raise KeyError(
+            f"Required field '{key}' not found in core or obj for item {obj.get('id_str', 'unknown')}"
+        )
+    return value
 
 
 def _first(obj: dict, paths: list[str]):
