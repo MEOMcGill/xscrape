@@ -207,6 +207,22 @@ class AccountsPool:
         await execute(self._db_file, qs)
         await self.login_all(usernames)
 
+    async def relogin_all(self):
+        qs = f"""
+        UPDATE accounts SET
+            active = false,
+            locks = json_object(),
+            last_used = NULL,
+            error_msg = NULL,
+            headers = json_object(),
+            cookies = json_object(),
+            user_agent = "{UserAgent().safari}"
+        WHERE TRUE
+        """
+
+        await execute(self._db_file, qs)
+        await self.login_all()
+
     async def relogin_failed(self):
         qs = "SELECT username FROM accounts WHERE active = false AND error_msg IS NOT NULL"
         rs = await fetchall(self._db_file, qs)

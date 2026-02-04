@@ -91,7 +91,10 @@ async def main(args):
         return
 
     if args.command == "relogin":
-        await pool.relogin(args.usernames)
+        if args.usernames:
+            await pool.relogin(args.usernames)
+        else:
+            await pool.relogin_all()
         return
 
     if args.command == "reset_locks":
@@ -169,7 +172,7 @@ def run():
 
     login_cmd = subparsers.add_parser("login_accounts", help="Login accounts")
     relogin = subparsers.add_parser("relogin", help="Re-login selected accounts")
-    relogin.add_argument("usernames", nargs="+", default=[], help="Usernames to re-login")
+    relogin.add_argument("usernames", nargs="*", default=[], help="Usernames to re-login")
     re_failed = subparsers.add_parser("relogin_failed", help="Retry login for failed accounts")
 
     login_commands = [login_cmd, relogin, re_failed]
@@ -206,3 +209,6 @@ def run():
         asyncio.run(main(args))
     except KeyboardInterrupt:
         pass
+
+if __name__ == "__main__":
+    run()
