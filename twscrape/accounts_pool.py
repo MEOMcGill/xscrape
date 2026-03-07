@@ -1,4 +1,5 @@
 import asyncio
+import random
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -36,15 +37,39 @@ class AccountsPool:
     # _order_by: str = "RANDOM()"
     _order_by: str = "username"
 
+    # Endpoint-specific rate limit spread (in seconds)
+    # These define the mean delay before an account can be reused for each endpoint
+    endpoint_to_spread: dict[str, int] = {
+        "SearchTimeline": 60,
+        "UserTweets": 90,
+        "UserTweetsAndReplies": 90,
+        "TweetDetail": 60,
+        "Followers": 120,
+        "Following": 120,
+        "Retweeters": 120,
+        "UserByRestId": 30,
+        "UserByScreenName": 30,
+        "ListLatestTweetsTimeline": 60,
+        "UserMedia": 90,
+        "Bookmarks": 60,
+        "BlueVerifiedFollowers": 120,
+        "AboutAccountQuery": 30,
+        "UserCreatorSubscriptions": 120,
+    }
+    DEFAULT_SPREAD: int = 120  # Default for unknown endpoints
+
     def __init__(
         self,
         db_file="accounts.db",
         login_config: LoginConfig | None = None,
         raise_when_no_account=False,
+        endpoint_spreads: dict[str, int] | None = None,
     ):
         self._db_file = db_file
         self._login_config = login_config or LoginConfig()
         self._raise_when_no_account = raise_when_no_account
+        if endpoint_spreads:
+            self.endpoint_to_spread = {**self.endpoint_to_spread, **endpoint_spreads}
 
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
@@ -256,14 +281,26 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
+    def _calculate_lock_delay(self, queue: str) -> int:
+        """Calculate lock delay using normal distribution for given endpoint/queue."""
+        mean = self.endpoint_to_spread.get(queue, self.DEFAULT_SPREAD)
+        std_dev = mean * 0.15  # 15% of mean
+        delay = random.gauss(mean, std_dev)
+        # Ensure delay is at least 50% of mean and at most 200% of mean
+        return int(max(mean * 0.5, min(delay, mean * 2)))
+
     async def _get_and_lock(self, queue: str, condition: str):
         # if space in condition, it's a subquery, otherwise it's username
         condition = f"({condition})" if " " in condition else f"'{condition}'"
 
+        # Calculate lock delay using distribution
+        lock_seconds = self._calculate_lock_delay(queue)
+        lock_duration = f"+{lock_seconds} seconds"
+
         if int(sqlite3.sqlite_version_info[1]) >= 35:
             qs = f"""
             UPDATE accounts SET
-                locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
+                locks = json_set(locks, '$.{queue}', datetime('now', '{lock_duration}')),
                 last_used = datetime({utc.ts()}, 'unixepoch')
             WHERE username = {condition}
             RETURNING *
@@ -273,7 +310,7 @@ class AccountsPool:
             tx = uuid.uuid4().hex
             qs = f"""
             UPDATE accounts SET
-                locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
+                locks = json_set(locks, '$.{queue}', datetime('now', '{lock_duration}')),
                 last_used = datetime({utc.ts()}, 'unixepoch'),
                 _tx = '{tx}'
             WHERE username = {condition}

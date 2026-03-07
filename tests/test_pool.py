@@ -136,3 +136,46 @@ async def test_get_stats(pool_mock: AccountsPool):
     assert stats["total"] == 1
     assert stats["active"] == 1
     assert stats[f"locked_{Q}"] == 1
+
+
+def test_calculate_lock_delay_distribution(pool_mock: AccountsPool):
+    """Test that lock delays follow expected distribution."""
+    Q = "SearchTimeline"
+    expected_mean = pool_mock.endpoint_to_spread[Q]
+
+    # Collect many samples to verify distribution
+    delays = [pool_mock._calculate_lock_delay(Q) for _ in range(100)]
+    mean_delay = sum(delays) / len(delays)
+
+    # Allow 25% variance due to random distribution
+    assert expected_mean * 0.75 <= mean_delay <= expected_mean * 1.25, (
+        f"Mean delay {mean_delay} is not within 25% of expected {expected_mean}"
+    )
+
+    # Verify bounds are enforced (50% to 200% of mean)
+    for delay in delays:
+        assert delay >= expected_mean * 0.5, f"Delay {delay} is below minimum"
+        assert delay <= expected_mean * 2, f"Delay {delay} is above maximum"
+
+
+def test_unknown_endpoint_default_spread(pool_mock: AccountsPool):
+    """Test that unknown endpoints use default spread."""
+    delays = [pool_mock._calculate_lock_delay("UnknownEndpoint") for _ in range(50)]
+
+    # Should be around DEFAULT_SPREAD (120) with bounds 60-240
+    for delay in delays:
+        assert 60 <= delay <= 240, f"Delay {delay} is outside expected range for default"
+
+
+async def test_custom_endpoint_spreads(tmp_path):
+    """Test custom endpoint spread configuration."""
+    custom_spreads = {"SearchTimeline": 30, "CustomEndpoint": 45}
+    pool = AccountsPool(tmp_path / "test.db", endpoint_spreads=custom_spreads)
+
+    # Custom spread should override default
+    assert pool.endpoint_to_spread["SearchTimeline"] == 30
+    assert pool.endpoint_to_spread["CustomEndpoint"] == 45
+
+    # Other endpoints should retain defaults
+    assert pool.endpoint_to_spread["Followers"] == 120
+    assert pool.endpoint_to_spread["UserTweets"] == 90
