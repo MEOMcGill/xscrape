@@ -192,6 +192,9 @@ def _flatten_user_v2(obj: dict) -> dict:
     flat.setdefault("profile_image_url_https", "")
     flat.setdefault("entities", {})
     flat.setdefault("pinned_tweet_ids_str", [])
+    # Partial user responses (e.g. community members) omit created_at. Sentinel
+    # epoch keeps get_required + parsedate_to_datetime working downstream.
+    flat.setdefault("created_at", "Thu Jan 01 00:00:00 +0000 1970")
     return flat
 
 

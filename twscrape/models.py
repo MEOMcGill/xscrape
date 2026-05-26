@@ -728,12 +728,13 @@ class TrendUrl(JSONTrait):
 
     @staticmethod
     def parse(obj: dict):
+        urt = obj.get("urtEndpointOptions") or {}
         inst = TrendUrl(
             url=obj["url"],
             urlType=obj["urlType"],
             urlEndpointOptions=[
                 RequestParam(key=x["key"], value=x["value"])
-                for x in obj["urtEndpointOptions"]["requestParams"]
+                for x in urt.get("requestParams", [])
             ],
         )
         _capture_extras(inst, obj, TrendUrl._KNOWN_KEYS)

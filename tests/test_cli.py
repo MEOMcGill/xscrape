@@ -92,7 +92,7 @@ async def test_add_accounts_prints_next_step(tmp_path, monkeypatch, capsys):
 
 
 async def test_search_prints_parsed_tweets(tmp_path, monkeypatch, capsys):
-    async def mock_search_raw(self, q, limit=-1, kv=None):
+    async def mock_search_raw(self, q, limit=-1, kv=None, **kwargs):
         yield fake_rep("raw_search")
 
     monkeypatch.setattr(cli.API, "search_raw", mock_search_raw)

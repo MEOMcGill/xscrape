@@ -42,14 +42,14 @@ def make_promo_page(cursor: str | None = "next_cursor"):
     return {"data": {"entries": entries}}
 
 
-async def _make_api():
-    pool = AccountsPool()
+async def _make_api(tmp_path):
+    pool = AccountsPool(db_file=str(tmp_path / "test.db"))
     await pool.add_account("u1", "p1", "e1", "ep1")
     await pool.set_active("u1", True)
     return API(pool)
 
 
-async def test_followers_continues_past_promo_pages(monkeypatch):
+async def test_followers_continues_past_promo_pages(tmp_path, monkeypatch):
     """followers() must not stop when X returns a page consisting entirely of promo entries."""
     with open(os.path.join(DATA_DIR, "raw_followers.json")) as f:
         users_page = json.load(f)
@@ -69,7 +69,7 @@ async def test_followers_continues_past_promo_pages(monkeypatch):
 
     monkeypatch.setattr(QueueClient, "get", mock_get)
 
-    api = await _make_api()
+    api = await _make_api(tmp_path)
     users = await gather(api.followers(123))
 
     assert idx >= 2, (
@@ -78,7 +78,7 @@ async def test_followers_continues_past_promo_pages(monkeypatch):
     assert len(users) > 0, "expected users from page 2 but got none"
 
 
-async def test_following_continues_past_promo_pages(monkeypatch):
+async def test_following_continues_past_promo_pages(tmp_path, monkeypatch):
     """following() must not stop when X returns a page consisting entirely of promo entries."""
     with open(os.path.join(DATA_DIR, "raw_following.json")) as f:
         users_page = json.load(f)
@@ -96,7 +96,7 @@ async def test_following_continues_past_promo_pages(monkeypatch):
 
     monkeypatch.setattr(QueueClient, "get", mock_get)
 
-    api = await _make_api()
+    api = await _make_api(tmp_path)
     users = await gather(api.following(123))
 
     assert idx >= 2, (
@@ -105,7 +105,7 @@ async def test_following_continues_past_promo_pages(monkeypatch):
     assert len(users) > 0, "expected users from page 2 but got none"
 
 
-async def test_followers_stops_after_too_many_consecutive_empty_pages(monkeypatch):
+async def test_followers_stops_after_too_many_consecutive_empty_pages(tmp_path, monkeypatch):
     """Safeguard: if X returns many consecutive promo-only pages with cursors, pagination must stop."""
     idx = 0
 
@@ -116,7 +116,7 @@ async def test_followers_stops_after_too_many_consecutive_empty_pages(monkeypatc
 
     monkeypatch.setattr(QueueClient, "get", mock_get)
 
-    api = await _make_api()
+    api = await _make_api(tmp_path)
     users = await gather(api.followers(123))
 
     assert len(users) == 0
