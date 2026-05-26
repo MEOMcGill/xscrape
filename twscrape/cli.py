@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import getpass
 import io
 import json
 import sqlite3
@@ -23,12 +24,15 @@ class CustomHelpFormatter(argparse.HelpFormatter):
 
 
 def get_fn_arg(args):
-    names = ["query", "tweet_id", "user_id", "username", "list_id", "trend_id"]
-    for name in names:
-        if name in args:
-            return name, getattr(args, name)
+    if not hasattr(args, "arg_name"):
+        logger.error(f"Missing argument name for command: {args.command}")
+        exit(1)
 
-    logger.error(f"Missing argument: {names}")
+    value = getattr(args, args.arg_name, None)
+    if value is not None:
+        return args.arg_name, value
+
+    logger.error(f"Missing argument value: {args.arg_name}")
     exit(1)
 
 
@@ -75,6 +79,13 @@ async def main(args):
     if args.command == "add_accounts":
         await pool.load_from_file(args.file_path, args.line_format)
         print("\nNow run:\ntwscrape login_accounts")
+        return
+
+    if args.command == "add_cookie":
+        cookies = args.cookies
+        if not cookies:
+            cookies = getpass.getpass("cookies (e.g. auth_token=xxx; ct0=yyy): ")
+        await pool.add_account_cookies(args.username, cookies)
         return
 
     if args.command == "del_accounts":
@@ -151,6 +162,7 @@ def run():
     def c_one(name: str, msg: str, a_name: str, a_msg: str, a_type: type = str):
         p = subparsers.add_parser(name, help=msg)
         p.add_argument(a_name, help=a_msg, type=a_type)
+        p.set_defaults(arg_name=a_name)
         p.add_argument("--raw", action="store_true", help="Print raw response")
         return p
 
@@ -163,17 +175,21 @@ def run():
     subparsers.add_parser("accounts", help="List all accounts")
     subparsers.add_parser("stats", help="Get current usage stats")
 
-    add_accounts = subparsers.add_parser("add_accounts", help="Add accounts")
+    add_accounts = subparsers.add_parser("add_accounts", help="Add accounts from file")
     add_accounts.add_argument("file_path", help="File with accounts")
-    add_accounts.add_argument("line_format", help="args of Pool.add_account splited by same delim")
+    add_accounts.add_argument("line_format", help="Account fields separated by delimiter")
 
-    del_accounts = subparsers.add_parser("del_accounts", help="Delete accounts")
+    add_cookie = subparsers.add_parser("add_cookie", help="Add one account from cookies")
+    add_cookie.add_argument("username", help="Twitter/X username")
+    add_cookie.add_argument("cookies", nargs="?", default=None, help="Cookie string")
+
+    del_accounts = subparsers.add_parser("del_accounts", help="Delete accounts by username")
     del_accounts.add_argument("usernames", nargs="+", default=[], help="Usernames to delete")
 
-    login_cmd = subparsers.add_parser("login_accounts", help="Login accounts")
-    relogin = subparsers.add_parser("relogin", help="Re-login selected accounts")
-    relogin.add_argument("usernames", nargs="*", default=[], help="Usernames to re-login")
-    re_failed = subparsers.add_parser("relogin_failed", help="Retry login for failed accounts")
+    login_cmd = subparsers.add_parser("login_accounts", help="Log in inactive accounts")
+    relogin = subparsers.add_parser("relogin", help="Re-log in selected accounts")
+    relogin.add_argument("usernames", nargs="+", default=[], help="Usernames to re-login")
+    re_failed = subparsers.add_parser("relogin_failed", help="Retry failed account logins")
 
     login_commands = [login_cmd, relogin, re_failed]
     for cmd in login_commands:
@@ -186,8 +202,8 @@ def run():
     c_lim("search", "Search for tweets", "query", "Search query")
     c_one("tweet_details", "Get tweet details", "tweet_id", "Tweet ID", int)
     c_lim("tweet_replies", "Get replies  of a tweet", "tweet_id", "Tweet ID", int)
+    c_lim("tweet_thread", "Get thread tweets", "tweet_id", "Tweet ID", int)
     c_lim("retweeters", "Get retweeters of a tweet", "tweet_id", "Tweet ID", int)
-    c_one("user_by_id", "Get user data by ID", "user_id", "User ID", int)
     c_one("user_by_login", "Get user data by username", "username", "Username")
     c_one("user_about", "Get about info for username", "username", "Username")
     c_lim("following", "Get user following", "user_id", "User ID", int)
@@ -199,6 +215,11 @@ def run():
     c_lim("user_tweets_and_replies", "Get user tweets and replies", "user_id", "User ID", int)
     c_lim("user_media", "Get user's media", "user_id", "User ID", int)
     c_lim("list_timeline", "Get tweets from list", "list_id", "List ID", int)
+    c_lim("list_members", "Get List members by list ID", "list_id", "List ID", int)
+    c_one("community_info", "Get community info", "community_id", "Community ID", str)
+    c_lim("community_members", "Get community members", "community_id", "Community ID", str)
+    c_lim("community_moderators", "Get community moderators", "community_id", "Community ID", str)
+    c_lim("community_tweets", "Get community tweets", "community_id", "Community ID", str)
     c_lim("trends", "Get trends", "trend_id", "Trend ID or name", str)
 
     args = p.parse_args()

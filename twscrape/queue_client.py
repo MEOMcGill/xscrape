@@ -36,12 +36,15 @@ class XClIdGenStore:
                 clid_gen = await XClIdGen.create()
                 cls.items[username] = clid_gen
                 return clid_gen
-            except httpx.HTTPStatusError:
+            except Exception as e:
                 tries += 1
+                logger.warning(
+                    f"XClIdGen creation attempt {tries}/3 failed: {type(e).__name__}: {e}"
+                )
                 await asyncio.sleep(1)
 
         raise AbortReqError(
-            "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+            "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
         )
 
 
@@ -198,6 +201,11 @@ class QueueClient:
         if self.debug:
             dump_rep(rep)
 
+        if "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400:
+            src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
+            logger.warning(f"Blocked by {src}: {rep.status_code} - {req_id(rep)}")
+            raise AbortReqError()
+
         try:
             res = rep.json()
         except json.JSONDecodeError:
@@ -209,7 +217,7 @@ class QueueClient:
 
         err_msg = "OK"
         if "errors" in res:
-            err_msg = set([f"({x.get('code', -1)}) {x['message']}" for x in res["errors"]])
+            err_msg = {f"({x.get('code', -1)}) {x['message']}" for x in res["errors"]}
             err_msg = "; ".join(list(err_msg))
 
         log_msg = f"{rep.status_code:3d} - {req_id(rep)} - {err_msg}"

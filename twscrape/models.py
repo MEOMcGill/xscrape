@@ -7,7 +7,7 @@ import string
 import sys
 import traceback
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Optional, Union
 
 import httpx
@@ -175,6 +175,54 @@ class AccountAbout(JSONTrait):
         )
         _capture_extras(inst, obj, AccountAbout._KNOWN_KEYS)
         return inst
+
+@dataclass
+class CommunityRule(JSONTrait):
+    id_str: str
+    name: str
+    description: str
+
+    @staticmethod
+    def parse(obj: dict):
+        return CommunityRule(
+            id_str=str(obj.get("rest_id", obj.get("id_str", ""))),
+            name=obj.get("name", ""),
+            description=obj.get("description", ""),
+        )
+
+
+@dataclass
+class Community(JSONTrait):
+    id: int
+    id_str: str
+    name: str
+    description: str | None
+    memberCount: int
+    moderatorCount: int
+    rules: list[CommunityRule]
+    topicId: str | None = None
+    topicName: str | None = None
+    isNsfw: bool | None = None
+
+    @staticmethod
+    def parse(obj: dict):
+        id_str = str(obj.get("rest_id") or obj.get("id_str") or "")
+        topic = obj.get("primary_community_topic") or {}
+        rules = [CommunityRule.parse(x) for x in obj.get("rules", [])]
+        return Community(
+            id=int(id_str),
+            id_str=id_str,
+            name=obj.get("name", ""),
+            description=obj.get("description"),
+            memberCount=obj.get("member_count", 0),
+            moderatorCount=obj.get("moderator_count", 0),
+            rules=rules,
+            topicId=topic.get("topic_id"),
+            topicName=topic.get("topic_name"),
+            isNsfw=obj.get("is_nsfw"),
+        )
+
+
 
 
 @dataclass
@@ -381,6 +429,12 @@ class Tweet(JSONTrait):
     sourceLabel: str | None = None
     card: Union[None, "SummaryCard", "PollCard", "BroadcastCard", "AudiospaceCard"] = None
     possibly_sensitive: bool | None = None
+    isQuoteStatus: bool = False
+    isTranslatable: bool = False
+    displayTextRange: list[int] | None = None
+    inReplyToScreenName: str | None = None
+    editControl: dict | None = None
+    voiceInfo: dict | None = None
     _type: str = "snscrape.modules.twitter.Tweet"
 
     # todo:
@@ -467,7 +521,13 @@ class Tweet(JSONTrait):
             sourceLabel=_get_source_label(obj),
             media=Media.parse(obj),
             card=_parse_card(obj, url),
-            possibly_sensitive=obj.get("possibly_sensitive", None),
+            possibly_sensitive=obj.get("possibly_sensitive"),
+            isQuoteStatus=obj.get("is_quote_status", False),
+            isTranslatable=obj.get("is_translatable", False),
+            displayTextRange=obj.get("display_text_range"),
+            inReplyToScreenName=obj.get("in_reply_to_screen_name"),
+            editControl=obj.get("edit_control"),
+            voiceInfo=obj.get("voice_info"),
         )
 
         # issue #42 – restore full rt text
@@ -682,8 +742,8 @@ class TrendUrl(JSONTrait):
 
 @dataclass
 class TrendMetadata(JSONTrait):
-    domain_context: str
-    meta_description: str
+    domain_context: str | None
+    meta_description: str | None
     url: TrendUrl
 
     _KNOWN_KEYS = frozenset({"domain_context", "meta_description", "url"})
@@ -691,8 +751,8 @@ class TrendMetadata(JSONTrait):
     @staticmethod
     def parse(obj: dict):
         inst = TrendMetadata(
-            domain_context=obj["domain_context"],
-            meta_description=obj["meta_description"],
+            domain_context=obj.get("domain_context"),
+            meta_description=obj.get("meta_description"),
             url=TrendUrl.parse(obj["url"]),
         )
         _capture_extras(inst, obj, TrendMetadata._KNOWN_KEYS)
@@ -1085,6 +1145,17 @@ def parse_about(rep: httpx.Response | dict) -> AccountAbout | None:
         return AccountAbout.parse(obj)
     except Exception as e:
         logger.error(f"Failed to parse about profile - {type(e)}:\n{traceback.format_exc()}")
+        return None
+
+def parse_community(rep: httpx.Response | dict) -> Community | None:
+    try:
+        res = rep if isinstance(rep, dict) else rep.json()
+        community = get_or(res, "data.communityResults.result")
+        if not community:
+            return None
+        return Community.parse(community)
+    except Exception as e:
+        logger.error(f"Failed to parse community - {type(e)}:\n{traceback.format_exc()}")
         return None
 
 
