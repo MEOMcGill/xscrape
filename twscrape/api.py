@@ -4,7 +4,7 @@ from typing import Literal
 from httpx import Response
 
 from .accounts_pool import AccountsPool
-from .logger import set_log_level
+from .logger import logger, set_log_level
 from .models import (
     AccountAbout,
     Tweet,
@@ -20,35 +20,37 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "bshMIjqDk8LTXTq4w91WKw/SearchTimeline"
-OP_UserByRestId = "WJ7rCtezBVT6nk6VM5R8Bw/UserByRestId"
-OP_UserByScreenName = "-oaLodhGbbnzJBACb1kk2Q/UserByScreenName"
-OP_TweetDetail = "6QzqakNMdh_YzBAR9SYPkQ/TweetDetail"
-OP_Followers = "SCu9fVIlCUm-BM8-tL5pkQ/Followers"
-OP_Following = "S5xUN9s2v4xk50KWGGvyvQ/Following"
-OP_Retweeters = "IQ43ps3iEcdrGV_OL1QaRw/Retweeters"
-OP_UserTweets = "lZRf8IC-GTuGxDwcsHW8aw/UserTweets"
-OP_UserTweetsAndReplies = "gXCeOBFsTOuimuCl1qXimg/UserTweetsAndReplies"
-OP_ListLatestTweetsTimeline = "NRigOCel0QKiWs_GuBgOzw/ListLatestTweetsTimeline"
-OP_BlueVerifiedFollowers = "mtuBQZOWziVtBIcSLg6V_g/BlueVerifiedFollowers"
+OP_SearchTimeline = "R0u1RWRf748KzyGBXvOYRA/SearchTimeline"
+OP_UserByRestId = "VQfQ9wwYdk6j_u2O4vt64Q/UserByRestId"
+OP_UserByScreenName = "IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName"
+OP_TweetDetail = "tCivIG3o9ls-9cLxTsdxZQ/TweetDetail"
+OP_Followers = "_wt2xR9Ozi8ZI7agzWf_bw/Followers"
+OP_Following = "j4s0ZOO_DvhECpS-2U-SUA/Following"
+OP_Retweeters = "niCJ2QyTuAgZWv01E7mqJQ/Retweeters"
+OP_UserTweets = "6fWQaBPK51aGyC_VC7t9GQ/UserTweets"
+OP_UserTweetsAndReplies = "J1_6xm8Paoy-0DOlAEEAfg/UserTweetsAndReplies"
+OP_ListLatestTweetsTimeline = "H_dAKg97dSn3FOMfrNS8nw/ListLatestTweetsTimeline"
+OP_BlueVerifiedFollowers = "5njvptGXJ5Ekeq1masfCaA/BlueVerifiedFollowers"
 OP_AboutAccountQuery = "zs_jFPFT78rBpXv9Z3U2YQ/AboutAccountQuery"
-OP_UserCreatorSubscriptions = "7qcGrVKpcooih_VvJLA1ng/UserCreatorSubscriptions"
-OP_UserMedia = "1D04dx9H2pseMQAbMjXTvQ/UserMedia"
-OP_Bookmarks = "43OUXyQe2KB6BLfli5CFPA/Bookmarks"
-OP_GenericTimelineById = "CT0YFEFf5GOYa5DJcxM91w/GenericTimelineById"
+OP_UserCreatorSubscriptions = "mfzxbFshrKsxu_UIGLjULg/UserCreatorSubscriptions"
+OP_UserMedia = "Uqb0z_IFBrxmPUhQ7pz6GQ/UserMedia"
+OP_Bookmarks = "1vFR5f4iSCQZLzjdSsNYwA/Bookmarks"
+OP_GenericTimelineById = "23uIIth19xjoWPrqcRtlig/GenericTimelineById"
 
 GQL_URL = "https://x.com/i/api/graphql"
-GQL_FEATURES = {  # search values here (view source) https://x.com/
+GQL_FEATURES = {  # search values here (view source) https://x.com/  # updated 2026-04-15
     "articles_preview_enabled": True,
     "c9s_tweet_anatomy_moderator_badge_enabled": True,
     "communities_web_enable_tweet_community_results_fetch": True,
-    "creator_subscriptions_quote_tweet_preview_enabled": False,
+    "content_disclosure_ai_generated_indicator_enabled": True,
+    "content_disclosure_indicator_enabled": True,
     "creator_subscriptions_tweet_preview_api_enabled": True,
     "freedom_of_speech_not_reach_fetch_enabled": True,
     "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
     "longform_notetweets_consumption_enabled": True,
-    "longform_notetweets_inline_media_enabled": True,
+    "longform_notetweets_inline_media_enabled": False,
     "longform_notetweets_rich_text_read_enabled": True,
+    "post_ctas_fetch_enabled": True,
     "premium_content_api_read_enabled": False,
     "profile_label_improvements_pcf_label_in_post_enabled": True,
     "responsive_web_edit_tweet_api_enabled": True,
@@ -58,7 +60,8 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
     "responsive_web_grok_analysis_button_from_backend": True,
     "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
     "responsive_web_grok_analyze_post_followups_enabled": True,
-    "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+    "responsive_web_grok_annotations_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": True,
     "responsive_web_grok_image_annotation_enabled": True,
     "responsive_web_grok_imagine_annotation_enabled": True,
     "responsive_web_grok_share_attachment_enabled": True,
@@ -66,10 +69,10 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
     "responsive_web_jetfuel_frame": True,
     "responsive_web_profile_redirect_enabled": False,
     "responsive_web_twitter_article_tweet_consumption_enabled": True,
-    "rweb_tipjar_consumption_enabled": True,
+    "rweb_cashtags_enabled": False,
+    "rweb_tipjar_consumption_enabled": False,
     "rweb_video_screen_enabled": False,
     "standardized_nudges_misinfo": True,
-    "tweet_awards_web_tipping_enabled": False,
     "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
     "verified_phone_label_enabled": False,
     "view_counts_everywhere_api_enabled": True,
@@ -89,6 +92,7 @@ class API:
         debug=False,
         proxy: str | None = None,
         raise_when_no_account=False,
+        iterate_accounts: bool = False,
     ):
         if isinstance(pool, AccountsPool):
             self.pool = pool
@@ -99,6 +103,9 @@ class API:
 
         self.proxy = proxy
         self.debug = debug
+        # When True, every paginated request swaps to a different account. Good
+        # for spreading rate-limit pressure across the pool within one query.
+        self.iterate_accounts = iterate_accounts
         if self.debug:
             set_log_level("DEBUG")
 
@@ -124,10 +131,13 @@ class API:
     async def _gql_items(
         self, op: str, kv: dict, ft: dict | None = None, limit=-1, cursor_type="Bottom"
     ):
-        queue, cur, cnt, active = op.split("/")[-1], None, 0, True
+        queue, cur, prev_cur, cnt, active = op.split("/")[-1], None, None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
 
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool, queue, self.debug, proxy=self.proxy,
+            iterate_accounts=self.iterate_accounts,
+        ) as client:
             while active:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
@@ -153,6 +163,15 @@ class API:
                 ]
                 cur = self._get_cursor(obj, cursor_type)
 
+                # X API sometimes returns the same cursor repeatedly — treat as end of pagination
+                if cur is not None and cur == prev_cur:
+                    cur = None
+                logger.trace(
+                    f"CURSOR_DEBUG | queue={queue} | entries={len(els)} | "
+                    f"cur={cur} | prev_cur={prev_cur} | cnt={cnt}"
+                )
+                prev_cur = cur
+
                 rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
                 if rep is None:
                     return
@@ -162,18 +181,21 @@ class API:
     async def _gql_item(self, op: str, kv: dict, ft: dict | None = None):
         ft = ft or {}
         queue = op.split("/")[-1]
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool, queue, self.debug, proxy=self.proxy,
+            iterate_accounts=self.iterate_accounts,
+        ) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
             return await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
 
     # search
 
-    async def search_raw(self, q: str, limit=-1, kv: KV = None):
+    async def search_raw(self, q: str, limit=-1, kv: KV = None, product: str = "Latest"):
         op = OP_SearchTimeline
         kv = {
             "rawQuery": q,
             "count": 20,
-            "product": "Latest",
+            "product": product,
             "querySource": "typed_query",
             "withGrokTranslatedBio": False,
             **(kv or {}),
@@ -182,8 +204,8 @@ class API:
             async for x in gen:
                 yield x
 
-    async def search(self, q: str, limit=-1, kv: KV = None):
-        async with aclosing(self.search_raw(q, limit=limit, kv=kv)) as gen:
+    async def search(self, q: str, limit=-1, kv: KV = None, product: str = "Latest"):
+        async with aclosing(self.search_raw(q, limit=limit, kv=kv, product=product)) as gen:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x

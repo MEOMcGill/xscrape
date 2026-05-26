@@ -114,12 +114,25 @@ def dump_rep(rep: Response):
 
 
 class QueueClient:
-    def __init__(self, pool: AccountsPool, queue: str, debug=False, proxy: str | None = None):
+    def __init__(
+        self,
+        pool: AccountsPool,
+        queue: str,
+        debug=False,
+        proxy: str | None = None,
+        iterate_accounts: bool = False,
+    ):
         self.pool = pool
         self.queue = queue
         self.debug = debug
         self.ctx: Ctx | None = None
         self.proxy = proxy
+        # When True, release the current account after every successful request so
+        # the next request picks a different one from the pool. The account's
+        # existing queue lock (set by _get_and_lock using endpoint_to_spread) is
+        # left in place — that lock is what keeps the pool from re-picking it
+        # immediately, letting ORDER BY username rotate through the rest.
+        self.iterate_accounts = iterate_accounts
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -145,6 +158,24 @@ class QueueClient:
             return
 
         await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
+
+    async def _rotate_ctx(self):
+        """Swap to a different account while keeping the HTTP client (and its TCP/TLS
+        connection pool) open. The old account's existing queue lock is left in
+        place so the pool won't re-pick it immediately; it expires naturally per
+        endpoint_to_spread. If no other account is available right now we just
+        keep the current one and retry on the next request."""
+        if self.ctx is None:
+            return
+
+        old_username = self.ctx.acc.username
+        new_acc = await self.pool.get_for_queue(self.queue)
+        if new_acc is None or new_acc.username == old_username:
+            return
+
+        new_acc.apply_to_client(self.ctx.clt)
+        self.ctx.acc = new_acc
+        self.ctx.req_count = 0
 
     async def _get_ctx(self):
         if self.ctx:
@@ -264,6 +295,8 @@ class QueueClient:
 
                 ctx.req_count += 1  # count only successful
                 unknown_retry, connection_retry = 0, 0
+                if self.iterate_accounts:
+                    await self._rotate_ctx()
                 return rep
             except AbortReqError:
                 # abort all queries

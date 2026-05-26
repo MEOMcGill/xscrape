@@ -40,21 +40,22 @@ class AccountsPool:
     # Endpoint-specific rate limit spread (in seconds)
     # These define the mean delay before an account can be reused for each endpoint
     endpoint_to_spread: dict[str, int] = {
-        "SearchTimeline": 60,
-        "UserTweets": 90,
-        "UserTweetsAndReplies": 90,
-        "TweetDetail": 60,
+        "SearchTimeline": 18,
+        "UserTweets": 25,
+        "UserTweetsAndReplies": 15,
+        "TweetDetail": 5,
         "Followers": 120,
         "Following": 120,
         "Retweeters": 120,
-        "UserByRestId": 30,
-        "UserByScreenName": 30,
+        "UserByScreenName": 10,
         "ListLatestTweetsTimeline": 60,
         "UserMedia": 90,
         "Bookmarks": 60,
         "BlueVerifiedFollowers": 120,
-        "AboutAccountQuery": 30,
         "UserCreatorSubscriptions": 120,
+        "GenericTimelineById": 1,
+        'UserByRestId': 5,
+        'AboutAccountQuery': 18
     }
     DEFAULT_SPREAD: int = 120  # Default for unknown endpoints
 

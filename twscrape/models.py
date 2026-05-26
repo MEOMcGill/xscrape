@@ -16,10 +16,31 @@ from .logger import logger
 from .utils import find_item, get_or, int_or, to_old_rep, utc
 
 
+_KEEP_RAW = os.getenv("XSCRAPE_KEEP_RAW", "").lower() in ("1", "true", "yes")
+
+
 @dataclass
 class JSONTrait:
+    def __post_init__(self):
+        # Use object.__setattr__ so this survives even if a subclass sets
+        # frozen=True in the future. `_extras` holds top-level keys present
+        # in the parsed API response that the parser didn't explicitly
+        # consume; `_raw` holds the full input dict when XSCRAPE_KEEP_RAW=1.
+        if not hasattr(self, "_extras"):
+            object.__setattr__(self, "_extras", {})
+
+    @property
+    def extras(self) -> dict:
+        return getattr(self, "_extras", {}) or {}
+
     def dict(self):
-        return asdict(self)
+        d = asdict(self)
+        if self.extras:
+            d["extras"] = dict(self.extras)
+        raw = getattr(self, "_raw", None)
+        if raw is not None:
+            d["_raw"] = raw
+        return d
 
     def json(self):
         return json.dumps(self.dict(), default=str)
@@ -30,14 +51,24 @@ class Coordinates(JSONTrait):
     longitude: float
     latitude: float
 
+    # parse() reads from a Tweet-shaped obj; extras are computed against the
+    # coordinates/geo sub-dict only, not the parent Tweet (Tweet handles its own).
+    # Note: no type annotation → Python treats this as a class attribute, not a
+    # dataclass field, so it doesn't end up in asdict() or __init__.
+    _KNOWN_KEYS = frozenset({"coordinates", "type"})
+
     @staticmethod
     def parse(tw_obj: dict):
         if tw_obj.get("coordinates"):
             coords = tw_obj["coordinates"]["coordinates"]
-            return Coordinates(coords[0], coords[1])
+            inst = Coordinates(coords[0], coords[1])
+            _capture_extras(inst, tw_obj["coordinates"], Coordinates._KNOWN_KEYS)
+            return inst
         if tw_obj.get("geo"):
             coords = tw_obj["geo"]["coordinates"]
-            return Coordinates(coords[1], coords[0])
+            inst = Coordinates(coords[1], coords[0])
+            _capture_extras(inst, tw_obj["geo"], Coordinates._KNOWN_KEYS)
+            return inst
         return None
 
 
@@ -50,9 +81,11 @@ class Place(JSONTrait):
     country: str
     countryCode: str
 
+    _KNOWN_KEYS = frozenset({"id", "full_name", "name", "place_type", "country", "country_code"})
+
     @staticmethod
     def parse(obj: dict):
-        return Place(
+        inst = Place(
             id=obj["id"],
             fullName=obj["full_name"],
             name=obj["name"],
@@ -60,6 +93,8 @@ class Place(JSONTrait):
             country=obj["country"],
             countryCode=obj["country_code"],
         )
+        _capture_extras(inst, obj, Place._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -67,6 +102,8 @@ class TextLink(JSONTrait):
     url: str
     text: str | None
     tcourl: str | None
+
+    _KNOWN_KEYS = frozenset({"expanded_url", "url", "display_url", "indices"})
 
     @staticmethod
     def parse(obj: dict):
@@ -77,7 +114,9 @@ class TextLink(JSONTrait):
         if not isinstance(url1, str) or not isinstance(url2, str):
             return None
 
-        return TextLink(url=url1, text=text, tcourl=url2)
+        inst = TextLink(url=url1, text=text, tcourl=url2)
+        _capture_extras(inst, obj, TextLink._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -93,6 +132,14 @@ class AccountAbout(JSONTrait):
     username_last_changed_at: int | None
     is_identity_verified: bool | None
     verified_since_msec: int | None
+
+    _KNOWN_KEYS = frozenset({
+        "about_profile", "core", "verification_info", "rest_id",
+        # fallbacks read from top-level via get_required:
+        "screen_name", "name",
+        # structural keys present after to_old_obj flattening:
+        "id", "id_str", "legacy",
+    })
 
     @staticmethod
     def parse(obj: dict):
@@ -111,7 +158,7 @@ class AccountAbout(JSONTrait):
         if rest_id_val is None:
             raise KeyError(f"Required field 'rest_id' not found for item {screen_name}")
 
-        return AccountAbout(
+        inst = AccountAbout(
             screen_name=screen_name,
             name=name,
             rest_id=rest_id_val,
@@ -126,6 +173,8 @@ class AccountAbout(JSONTrait):
             is_identity_verified=verification.get("is_identity_verified"),
             verified_since_msec=int(verified_since) if verified_since is not None else None,
         )
+        _capture_extras(inst, obj, AccountAbout._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -136,6 +185,8 @@ class UserRef(JSONTrait):
     displayname: str
     _type: str = "snscrape.modules.twitter.UserRef"
 
+    _KNOWN_KEYS = frozenset({"id_str", "core", "screen_name", "name", "id"})
+
     @staticmethod
     def parse(obj: dict):
         # Handle new nested structure where fields may be in 'core'
@@ -143,12 +194,36 @@ class UserRef(JSONTrait):
         screen_name = get_required(obj, core, "screen_name")
         name = get_required(obj, core, "name")
 
-        return UserRef(
+        inst = UserRef(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
             username=screen_name,
             displayname=name,
         )
+        _capture_extras(inst, obj, UserRef._KNOWN_KEYS)
+        return inst
+
+
+@dataclass
+class SuspendedUser(JSONTrait):
+    id: int
+    id_str: str
+    message: str
+    reason: str
+    _type: str = "SuspendedUser"
+
+    _KNOWN_KEYS = frozenset({"id_str", "message", "reason", "__typename", "id"})
+
+    @staticmethod
+    def parse(obj: dict, res=None):
+        inst = SuspendedUser(
+            id=int(obj["id_str"]),
+            id_str=obj["id_str"],
+            message=obj.get("message", ""),
+            reason=obj.get("reason", ""),
+        )
+        _capture_extras(inst, obj, SuspendedUser._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -180,6 +255,34 @@ class User(JSONTrait):
     # todo:
     # link: typing.Optional[TextLink] = None
     # label: typing.Optional["UserLabel"] = None
+
+    _KNOWN_KEYS = frozenset({
+        # structural / identity
+        "__typename", "id", "id_str", "rest_id", "core", "legacy",
+        # legacy fields flattened onto top-level that parse() reads
+        "screen_name", "name", "created_at", "description",
+        "followers_count", "friends_count", "statuses_count",
+        "favourites_count", "listed_count", "media_count",
+        "location", "profile_image_url_https",
+        "profile_banner_url", "verified", "protected",
+        "entities", "pinned_tweet_ids_str",
+        # top-level fields parse() reads
+        "is_blue_verified", "verified_type",
+        # known top-level fields currently sent by X but not (yet) modeled.
+        # Captured here so we don't log them on every run; promote to actual
+        # User fields when you want to expose them. Raise novelty when X adds
+        # something outside this set.
+        "affiliates_highlighted_label", "business_account", "can_dm", "can_media_tag",
+        "creator_subscriptions_count", "default_profile", "default_profile_image",
+        "fast_followers_count", "following", "has_custom_timelines",
+        "has_graduated_access", "has_hidden_subscriptions_on_profile",
+        "has_nft_avatar", "highlights_info", "is_profile_translatable",
+        "is_translator", "legacy_extended_profile", "normal_followers_count",
+        "possibly_sensitive", "professional", "profile_image_shape",
+        "profile_interstitial_type", "super_follow_eligible",
+        "tipjar_settings", "translator_type", "url",
+        "verification_info", "want_retweets", "withheld_in_countries",
+    })
 
     @staticmethod
     def parse(obj: dict, res=None):
@@ -214,7 +317,7 @@ class User(JSONTrait):
         blue = obj.get("is_blue_verified")
         blue_type = obj.get("verified_type")
 
-        return User(
+        inst = User(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
             url=f"https://x.com/{screen_name}",
@@ -240,6 +343,8 @@ class User(JSONTrait):
             ),
             pinnedIds=[int(x) for x in pinned_ids],
         )
+        _capture_extras(inst, obj, User._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -281,6 +386,32 @@ class Tweet(JSONTrait):
     # todo:
     # renderedContent: str
     # vibe: Optional["Vibe"] = None
+
+    _KNOWN_KEYS = frozenset({
+        # structural / identity
+        "id", "id_str", "rest_id", "core", "legacy", "__typename",
+        # top-level fields parse() reads directly
+        "user_id_str", "created_at", "lang", "full_text",
+        "reply_count", "retweet_count", "favorite_count", "quote_count",
+        "bookmark_count", "conversation_id_str",
+        "entities", "extended_entities", "note_tweet",
+        "place", "coordinates", "geo",
+        "in_reply_to_status_id_str", "in_reply_to_user_id_str",
+        "in_reply_to_screen_name",
+        "source", "possibly_sensitive", "card",
+        "views", "ext_views",
+        "retweeted_status_id_str", "retweeted_status_result",
+        "quoted_status_id_str", "quoted_status_result",
+        # known top-level fields X currently sends but parser doesn't consume
+        # — silenced to keep steady-state logs clean; promote to Tweet fields
+        # when you want to expose them.
+        "article", "birdwatch_pivot", "bookmarked", "conversation_control",
+        "display_text_range", "edit_control", "edit_perspective", "favorited",
+        "has_birdwatch_notes", "is_quote_status", "is_translatable",
+        "limited_actions", "possibly_sensitive_editable", "previous_counts",
+        "quick_promote_eligibility", "quoted_status_permalink", "quotedRefResult",
+        "retweeted", "scopes", "unmention_data",
+    })
 
     @staticmethod
     def parse(obj: dict, res: dict):
@@ -346,6 +477,7 @@ class Tweet(JSONTrait):
             if doc.rawContent != rt_msg:
                 doc.rawContent = rt_msg
 
+        _capture_extras(doc, obj, Tweet._KNOWN_KEYS)
         return doc
 
 
@@ -353,9 +485,18 @@ class Tweet(JSONTrait):
 class MediaPhoto(JSONTrait):
     url: str
 
+    _KNOWN_KEYS = frozenset({
+        "media_url_https", "type", "id", "id_str", "display_url", "expanded_url",
+        "indices", "url", "features", "sizes", "original_info",
+        "media_key", "ext_media_availability", "ext_alt_text", "source_user_id",
+        "source_user_id_str", "source_status_id", "source_status_id_str",
+    })
+
     @staticmethod
     def parse(obj: dict):
-        return MediaPhoto(url=obj["media_url_https"])
+        inst = MediaPhoto(url=obj["media_url_https"])
+        _capture_extras(inst, obj, MediaPhoto._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -365,9 +506,17 @@ class MediaVideo(JSONTrait):
     duration: int
     views: int | None = None
 
+    _KNOWN_KEYS = frozenset({
+        "media_url_https", "video_info", "mediaStats", "type",
+        "id", "id_str", "display_url", "expanded_url", "indices", "url",
+        "features", "sizes", "original_info", "media_key",
+        "ext_media_availability", "additional_media_info",
+        "source_user_id", "source_user_id_str", "source_status_id", "source_status_id_str",
+    })
+
     @staticmethod
     def parse(obj: dict):
-        return MediaVideo(
+        inst = MediaVideo(
             thumbnailUrl=obj["media_url_https"],
             variants=[
                 MediaVideoVariant.parse(x) for x in obj["video_info"]["variants"] if "bitrate" in x
@@ -375,6 +524,8 @@ class MediaVideo(JSONTrait):
             duration=obj["video_info"]["duration_millis"],
             views=int_or(obj, "mediaStats.viewCount"),
         )
+        _capture_extras(inst, obj, MediaVideo._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -382,15 +533,24 @@ class MediaAnimated(JSONTrait):
     thumbnailUrl: str
     videoUrl: str
 
+    _KNOWN_KEYS = frozenset({
+        "media_url_https", "video_info", "type",
+        "id", "id_str", "display_url", "expanded_url", "indices", "url",
+        "features", "sizes", "original_info", "media_key",
+        "ext_media_availability",
+    })
+
     @staticmethod
     def parse(obj: dict):
         try:
-            return MediaAnimated(
+            inst = MediaAnimated(
                 thumbnailUrl=obj["media_url_https"],
                 videoUrl=obj["video_info"]["variants"][0]["url"],
             )
         except KeyError:
             return None
+        _capture_extras(inst, obj, MediaAnimated._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -399,13 +559,17 @@ class MediaVideoVariant(JSONTrait):
     bitrate: int
     url: str
 
+    _KNOWN_KEYS = frozenset({"content_type", "bitrate", "url"})
+
     @staticmethod
     def parse(obj: dict):
-        return MediaVideoVariant(
+        inst = MediaVideoVariant(
             contentType=obj["content_type"],
             bitrate=obj["bitrate"],
             url=obj["url"],
         )
+        _capture_extras(inst, obj, MediaVideoVariant._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -413,6 +577,10 @@ class Media(JSONTrait):
     photos: list[MediaPhoto] = field(default_factory=list)
     videos: list[MediaVideo] = field(default_factory=list)
     animated: list[MediaAnimated] = field(default_factory=list)
+
+    # Media.parse takes a Tweet-shaped obj and reads obj["extended_entities"].
+    # Not wired to _capture_extras — Tweet handles top-level drift; Media only
+    # aggregates pre-parsed sub-entities (photos/videos/animated).
 
     @staticmethod
     def parse(obj: dict):
@@ -496,9 +664,11 @@ class TrendUrl(JSONTrait):
     urlType: str
     urlEndpointOptions: list[RequestParam]
 
+    _KNOWN_KEYS = frozenset({"url", "urlType", "urtEndpointOptions"})
+
     @staticmethod
     def parse(obj: dict):
-        return TrendUrl(
+        inst = TrendUrl(
             url=obj["url"],
             urlType=obj["urlType"],
             urlEndpointOptions=[
@@ -506,6 +676,8 @@ class TrendUrl(JSONTrait):
                 for x in obj["urtEndpointOptions"]["requestParams"]
             ],
         )
+        _capture_extras(inst, obj, TrendUrl._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -514,13 +686,17 @@ class TrendMetadata(JSONTrait):
     meta_description: str
     url: TrendUrl
 
+    _KNOWN_KEYS = frozenset({"domain_context", "meta_description", "url"})
+
     @staticmethod
     def parse(obj: dict):
-        return TrendMetadata(
+        inst = TrendMetadata(
             domain_context=obj["domain_context"],
             meta_description=obj["meta_description"],
             url=TrendUrl.parse(obj["url"]),
         )
+        _capture_extras(inst, obj, TrendMetadata._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -528,9 +704,13 @@ class GroupedTrend(JSONTrait):
     name: str
     url: TrendUrl
 
+    _KNOWN_KEYS = frozenset({"name", "url"})
+
     @staticmethod
     def parse(obj: dict):
-        return GroupedTrend(name=obj["name"], url=TrendUrl.parse(obj["url"]))
+        inst = GroupedTrend(name=obj["name"], url=TrendUrl.parse(obj["url"]))
+        _capture_extras(inst, obj, GroupedTrend._KNOWN_KEYS)
+        return inst
 
 
 @dataclass
@@ -543,10 +723,12 @@ class Trend(JSONTrait):
     grouped_trends: list[GroupedTrend] = field(default_factory=list)
     _type: str = "timelinetrend"
 
+    _KNOWN_KEYS = frozenset({"name", "rank", "trend_url", "trend_metadata", "grouped_trends"})
+
     @staticmethod
     def parse(obj: dict, res=None):
         grouped_trends = [GroupedTrend.parse(x) for x in obj.get("grouped_trends", [])]
-        return Trend(
+        inst = Trend(
             id=f"trend-{obj['name']}",
             name=obj["name"],
             rank=int(obj["rank"]) if "rank" in obj else None,
@@ -554,6 +736,8 @@ class Trend(JSONTrait):
             trend_metadata=TrendMetadata.parse(obj["trend_metadata"]),
             grouped_trends=grouped_trends,
         )
+        _capture_extras(inst, obj, Trend._KNOWN_KEYS)
+        return inst
 
 
 def _parse_card_get_bool(values: list[dict], key: str):
@@ -758,6 +942,33 @@ def get_required(obj: dict, core: dict, key: str):
     return value
 
 
+# Deduplicated log state: emit one INFO line per (model-class, unknown-key) per process.
+_SEEN_EXTRAS: set[tuple[str, str]] = set()
+
+
+def _capture_extras(model, obj: dict, known) -> None:
+    """Stash every top-level key in `obj` that's not in `known` onto `model._extras`.
+
+    Called at the end of each model's `parse()` so that when X ships a new field
+    we neither drop it silently nor crash. See JSONTrait.extras / .dict() for how
+    the captured values surface to downstream consumers.
+    """
+    if not isinstance(obj, dict):
+        return
+    extra = {k: v for k, v in obj.items() if k not in known}
+    if _KEEP_RAW:
+        object.__setattr__(model, "_raw", obj)
+    if not extra:
+        return
+    object.__setattr__(model, "_extras", extra)
+    cls_name = type(model).__name__
+    for k in extra:
+        seen_key = (cls_name, k)
+        if seen_key not in _SEEN_EXTRAS:
+            _SEEN_EXTRAS.add(seen_key)
+            logger.info(f"xscrape: unknown top-level key on {cls_name}: {k!r}")
+
+
 def _first(obj: dict, paths: list[str]):
     for x in paths:
         cid = get_or(obj, x, None)
@@ -816,7 +1027,10 @@ def _parse_items(rep: httpx.Response, kind: str, limit: int = -1):
             pass
 
         try:
-            tmp = Cls.parse(x, obj)
+            if kind == "user" and x.get("__typename") == "UserUnavailable":
+                tmp = SuspendedUser.parse(x, obj)
+            else:
+                tmp = Cls.parse(x, obj)
             if tmp.id not in ids:
                 ids.add(tmp.id)
                 yield tmp

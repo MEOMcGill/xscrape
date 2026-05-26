@@ -11,3 +11,7 @@ data_media/
 dist/
 db_tmp
 twscrape/__pycache__/*
+docs
+CLAUDE.md
+tmp
+db_tmp

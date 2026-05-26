@@ -488,3 +488,40 @@ async def test_cards():
     assert doc.card._type == "audiospace"
     assert isinstance(doc.card, AudiospaceCard)
     assert doc.card.url is not None
+
+
+async def test_extras_absent_on_stable_fixture():
+    """Current fixtures should not surface any extras — if this fails it means
+    the API gained a new key we didn't list in _KNOWN_KEYS (good — the log line
+    told us what to add) or our _KNOWN_KEYS drifted."""
+    from twscrape.utils import to_old_rep
+
+    for name in ("raw_user_by_id", "raw_user_by_login", "raw_search"):
+        rep = to_old_rep(fake_rep(name).json())
+        for u in rep.get("users", {}).values():
+            user = User.parse(u)
+            assert user.extras == {}, f"{name}: unexpected extras {list(user.extras)}"
+            assert "extras" not in user.dict()
+        for t in rep.get("tweets", {}).values():
+            tw = Tweet.parse(t, rep)
+            assert tw.extras == {}, f"{name}: unexpected extras {list(tw.extras)}"
+            assert "extras" not in tw.dict()
+
+
+async def test_extras_captures_injected_unknown_key():
+    """When the API ships a new top-level field, it lands in model.extras and
+    is included in .dict() output without breaking existing fields."""
+    from twscrape.utils import to_old_rep
+
+    rep = to_old_rep(fake_rep("raw_user_by_id").json())
+    user_obj = next(iter(rep["users"].values()))
+    user_obj["is_verified_organization"] = True
+    user_obj["plan_color"] = "gold"
+
+    user = User.parse(user_obj)
+    assert user.extras == {"is_verified_organization": True, "plan_color": "gold"}
+    d = user.dict()
+    assert d["extras"] == {"is_verified_organization": True, "plan_color": "gold"}
+    # declared fields still populated correctly
+    assert d["id"] == user.id
+    assert d["username"] == user.username
