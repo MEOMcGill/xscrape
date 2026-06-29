@@ -203,9 +203,9 @@ def _flatten_user_v2(obj: dict) -> dict:
     flat.setdefault("profile_image_url_https", "")
     flat.setdefault("entities", {})
     flat.setdefault("pinned_tweet_ids_str", [])
-    # Partial user responses (e.g. community members) omit created_at. Sentinel
-    # epoch keeps get_required + parsedate_to_datetime working downstream.
-    flat.setdefault("created_at", "Thu Jan 01 00:00:00 +0000 1970")
+    # Note: created_at is intentionally NOT defaulted here. It's absent on partial
+    # user payloads; User.parse applies an epoch fallback, while a missing
+    # screen_name/name surfaces as a parse error rather than being masked.
     return flat
 
 

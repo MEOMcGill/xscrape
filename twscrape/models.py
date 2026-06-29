@@ -332,36 +332,24 @@ class User(JSONTrait):
 
     @staticmethod
     def parse(obj: dict, res=None):
-        # Handle new nested structure where some fields moved to 'core' and 'legacy'
-        core = obj.get("core") or {}
-        legacy = obj.get("legacy") or {}
+        # obj is already flattened by _flatten_user_v2 — the single source of truth
+        # for X's response shape (core/legacy/avatar/verification/privacy/profile_bio
+        # are merged onto the top level there). Read flat keys directly.
+        #
+        # screen_name/name are truly required: a user without them is unusable, so
+        # raise (surfaced as a parse dump) rather than emit a junk record.
+        screen_name = obj.get("screen_name")
+        name = obj.get("name")
+        if not screen_name or not name:
+            raise KeyError(
+                f"User missing required field screen_name/name (id={obj.get('id_str', 'unknown')})"
+            )
 
-        # Required fields can be in either old location (top-level) or new location (core/legacy)
-        screen_name = get_required(obj, core, "screen_name")
-        name = get_required(obj, core, "name")
-        created_at = get_required(obj, core, "created_at")
-
-        # Most other required fields moved to 'legacy', fallback to top-level for old format
-        description = get_required(obj, legacy, "description")
-        followers_count = get_required(obj, legacy, "followers_count")
-        friends_count = get_required(obj, legacy, "friends_count")
-        statuses_count = get_required(obj, legacy, "statuses_count")
-        favourites_count = get_required(obj, legacy, "favourites_count")
-        listed_count = get_required(obj, legacy, "listed_count")
-        media_count = get_required(obj, legacy, "media_count")
-        location = get_required(obj, legacy, "location")
-        profile_image_url = get_required(obj, legacy, "profile_image_url_https")
-
-        # Optional fields
-        profile_banner_url = legacy.get("profile_banner_url") or obj.get("profile_banner_url")
-        verified = legacy.get("verified") or obj.get("verified")
-        protected = legacy.get("protected") or obj.get("protected")
-        entities = legacy.get("entities") or obj.get("entities", {})
-        pinned_ids = legacy.get("pinned_tweet_ids_str") or obj.get("pinned_tweet_ids_str", [])
-
-        # is_blue_verified is at top level in new format
-        blue = obj.get("is_blue_verified")
-        blue_type = obj.get("verified_type")
+        # created_at is absent on partial user payloads (e.g. community members);
+        # fall back to epoch so downstream date parsing stays graceful.
+        created_at = obj.get("created_at") or "Thu Jan 01 00:00:00 +0000 1970"
+        entities = obj.get("entities") or {}
+        pinned_ids = obj.get("pinned_tweet_ids_str") or []
 
         inst = User(
             id=int(obj["id_str"]),
@@ -369,21 +357,21 @@ class User(JSONTrait):
             url=f"https://x.com/{screen_name}",
             username=screen_name,
             displayname=name,
-            rawDescription=description,
+            rawDescription=obj.get("description", ""),
             created=email.utils.parsedate_to_datetime(created_at),
-            followersCount=followers_count,
-            friendsCount=friends_count,
-            statusesCount=statuses_count,
-            favouritesCount=favourites_count,
-            listedCount=listed_count,
-            mediaCount=media_count,
-            location=location,
-            profileImageUrl=profile_image_url,
-            profileBannerUrl=profile_banner_url,
-            verified=verified,
-            blue=blue,
-            blueType=blue_type,
-            protected=protected,
+            followersCount=obj.get("followers_count", 0),
+            friendsCount=obj.get("friends_count", 0),
+            statusesCount=obj.get("statuses_count", 0),
+            favouritesCount=obj.get("favourites_count", 0),
+            listedCount=obj.get("listed_count", 0),
+            mediaCount=obj.get("media_count", 0),
+            location=obj.get("location", ""),
+            profileImageUrl=obj.get("profile_image_url_https", ""),
+            profileBannerUrl=obj.get("profile_banner_url"),
+            verified=obj.get("verified"),
+            blue=obj.get("is_blue_verified"),
+            blueType=obj.get("verified_type"),
+            protected=obj.get("protected"),
             descriptionLinks=_parse_links(
                 {"entities": entities}, ["entities.description.urls", "entities.url.urls"]
             ),
