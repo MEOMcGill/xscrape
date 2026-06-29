@@ -7,13 +7,12 @@ import string
 import sys
 import traceback
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Generator, Optional, Union
 
 from .http import Response
 from .logger import logger
 from .utils import find_item, get_or, int_or, to_old_rep, utc
-
 
 _KEEP_RAW = os.getenv("XSCRAPE_KEEP_RAW", "").lower() in ("1", "true", "yes")
 
@@ -106,9 +105,9 @@ class TextLink(JSONTrait):
 
     @staticmethod
     def parse(obj: dict):
-        url1 = obj.get("expanded_url", None)
-        url2 = obj.get("url", None)
-        text = obj.get("display_url", None)
+        url1 = obj.get("expanded_url")
+        url2 = obj.get("url")
+        text = obj.get("display_url")
 
         if not isinstance(url1, str) or not isinstance(url2, str):
             return None
@@ -418,8 +417,8 @@ class Tweet(JSONTrait):
     viewCount: int | None = None
     retweetedTweet: Optional["Tweet"] = None
     quotedTweet: Optional["Tweet"] = None
-    place: Optional[Place] = None
-    coordinates: Optional[Coordinates] = None
+    place: Place | None = None
+    coordinates: Coordinates | None = None
     inReplyToTweetId: int | None = None
     inReplyToTweetIdStr: str | None = None
     inReplyToUser: UserRef | None = None
@@ -515,7 +514,7 @@ class Tweet(JSONTrait):
             inReplyToTweetId=int_or(obj, "in_reply_to_status_id_str"),
             inReplyToTweetIdStr=get_or(obj, "in_reply_to_status_id_str"),
             inReplyToUser=_get_reply_user(obj, res),
-            source=obj.get("source", None),
+            source=obj.get("source"),
             sourceUrl=_get_source_url(obj),
             sourceLabel=_get_source_label(obj),
             media=Media.parse(obj),
@@ -525,7 +524,7 @@ class Tweet(JSONTrait):
             isTranslatable=obj.get("is_translatable", False),
             displayTextRange=obj.get("display_text_range"),
             inReplyToScreenName=obj.get("in_reply_to_screen_name"),
-            editControl=obj.get("edit_control"),
+            editControl=_parse_edit_control(obj),
             voiceInfo=obj.get("voice_info"),
         )
 
@@ -775,8 +774,8 @@ class GroupedTrend(JSONTrait):
 
 @dataclass
 class Trend(JSONTrait):
-    id: Optional[str]
-    rank: Optional[str | int]
+    id: str | None
+    rank: str | int | None
     name: str
     trend_url: TrendUrl
     trend_metadata: TrendMetadata
@@ -950,8 +949,20 @@ def _parse_card(obj: dict, url: str):
 # internal helpers
 
 
+def _parse_edit_control(obj: dict):
+    edit = obj.get("edit_control")
+    if not isinstance(edit, dict):
+        return None
+
+    initial = edit.get("edit_control_initial")
+    if not isinstance(initial, dict):
+        return edit
+
+    return {**initial, **{k: v for k, v in edit.items() if k != "edit_control_initial"}}
+
+
 def _get_reply_user(tw_obj: dict, res: dict):
-    user_id = tw_obj.get("in_reply_to_user_id_str", None)
+    user_id = tw_obj.get("in_reply_to_user_id_str")
     if user_id is None:
         return None
 
@@ -968,14 +979,14 @@ def _get_reply_user(tw_obj: dict, res: dict):
 
 
 def _get_source_url(tw_obj: dict):
-    source = tw_obj.get("source", None)
+    source = tw_obj.get("source")
     if source and (match := re.search(r'href=[\'"]?([^\'" >]+)', source)):
         return str(match.group(1))
     return None
 
 
 def _get_source_label(tw_obj: dict):
-    source = tw_obj.get("source", None)
+    source = tw_obj.get("source")
     if source and (match := re.search(r">([^<]*)<", source)):
         return str(match.group(1))
     return None

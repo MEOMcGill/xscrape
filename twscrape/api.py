@@ -245,19 +245,15 @@ class API:
         op = OP_UserByScreenName
         kv = {"screen_name": login, "withSafetyModeUserFields": True, **(kv or {})}
         ft = {
-            "hidden_profile_subscriptions_enabled": True,
-            "profile_label_improvements_pcf_label_in_post_enabled": True,
-            "responsive_web_profile_redirect_enabled": False,
-            "rweb_tipjar_consumption_enabled": True,
-            "verified_phone_label_enabled": False,
-            "subscriptions_verification_info_is_identity_verified_enabled": True,
-            "subscriptions_verification_info_verified_since_enabled": True,
             "highlights_tweets_tab_ui_enabled": True,
-            "responsive_web_twitter_article_notes_tab_enabled": True,
-            "subscriptions_feature_can_gift_premium": True,
+            "hidden_profile_likes_enabled": True,
             "creator_subscriptions_tweet_preview_api_enabled": True,
-            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-            "responsive_web_graphql_timeline_navigation_enabled": True,
+            "hidden_profile_subscriptions_enabled": True,
+            "subscriptions_verification_info_verified_since_enabled": True,
+            "subscriptions_verification_info_is_identity_verified_enabled": False,
+            "responsive_web_twitter_article_notes_tab_enabled": False,
+            "subscriptions_feature_can_gift_premium": False,
+            "profile_label_improvements_pcf_label_in_post_enabled": False,
         }
         return await self._gql_item(op, kv, ft)
 
@@ -287,6 +283,7 @@ class API:
             "withQuickPromoteEligibilityTweetFields": True,
             "withBirdwatchNotes": True,
             "withVoice": True,
+            "withV2Timeline": True,
             **(kv or {}),
         }
         return await self._gql_item(op, kv)
@@ -303,12 +300,13 @@ class API:
         kv = {
             "focalTweetId": str(twid),
             "referrer": "tweet",
-            "with_rux_injections": False,
+            "with_rux_injections": True,
             "includePromotedContent": True,
             "withCommunity": True,
             "withQuickPromoteEligibilityTweetFields": True,
             "withBirdwatchNotes": True,
             "withVoice": True,
+            "withV2Timeline": True,
             **(kv or {}),
         }
         async with aclosing(
@@ -391,14 +389,9 @@ class API:
 
     async def followers_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_Followers
-        kv = {
-            "userId": str(uid),
-            "count": 20,
-            "includePromotedContent": False,
-            "withGrokTranslatedBio": False,
-            **(kv or {}),
-        }
-        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
+        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
+        ft = {"responsive_web_twitter_article_notes_tab_enabled": False}
+        async with aclosing(self._gql_items(op, kv, limit=limit, ft=ft)) as gen:
             async for x in gen:
                 yield x
 
@@ -412,13 +405,7 @@ class API:
 
     async def verified_followers_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_BlueVerifiedFollowers
-        kv = {
-            "userId": str(uid),
-            "count": 20,
-            "includePromotedContent": False,
-            "withGrokTranslatedBio": False,
-            **(kv or {}),
-        }
+        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
         ft = {
             "responsive_web_twitter_article_notes_tab_enabled": True,
         }
@@ -436,13 +423,7 @@ class API:
 
     async def following_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_Following
-        kv = {
-            "userId": str(uid),
-            "count": 20,
-            "includePromotedContent": False,
-            "withGrokTranslatedBio": False,
-            **(kv or {}),
-        }
+        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
