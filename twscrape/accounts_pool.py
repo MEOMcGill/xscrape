@@ -5,11 +5,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import TypedDict
 
-from fake_useragent import UserAgent
-from httpx import HTTPStatusError
-
 from .account import Account
 from .db import execute, fetchall, fetchone
+from .http import HttpStatusError
 from .logger import logger
 from .login import LoginConfig, login
 from .utils import get_env_bool, parse_cookies, utc
@@ -119,7 +117,7 @@ class AccountsPool:
             password=password,
             email=email,
             email_password=email_password,
-            user_agent=user_agent or UserAgent().safari,
+            user_agent=user_agent or "@chrome",
             active=False,
             locks={},
             stats={},
@@ -193,7 +191,7 @@ class AccountsPool:
             await login(account, cfg=self._login_config)
             logger.info(f"Logged in to {account.username} successfully")
             return True
-        except HTTPStatusError as e:
+        except HttpStatusError as e:
             rep = e.response
             logger.error(f"Failed to login '{account.username}': {rep.status_code} - {rep.text}")
             return False
@@ -236,7 +234,7 @@ class AccountsPool:
             error_msg = NULL,
             headers = json_object(),
             cookies = json_object(),
-            user_agent = "{UserAgent().safari}"
+            user_agent = "@chrome"
         WHERE username IN ({",".join([f'"{x}"' for x in usernames])})
         """
 
@@ -244,7 +242,7 @@ class AccountsPool:
         await self.login_all(usernames)
 
     async def relogin_all(self):
-        qs = f"""
+        qs = """
         UPDATE accounts SET
             active = false,
             locks = json_object(),
@@ -252,7 +250,7 @@ class AccountsPool:
             error_msg = NULL,
             headers = json_object(),
             cookies = json_object(),
-            user_agent = "{UserAgent().safari}"
+            user_agent = "@chrome"
         WHERE TRUE
         """
 

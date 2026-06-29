@@ -1,12 +1,13 @@
 import dataclasses
+import hashlib
 import json
 import os
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-from httpx import AsyncClient, AsyncHTTPTransport
-
+from .http import HttpClient
+from .http import make_client as _make_http_client
 from .models import JSONTrait
 from .utils import parse_proxy, utc
 
@@ -58,7 +59,18 @@ class Account(JSONTrait):
         rs["last_used"] = rs["last_used"].isoformat() if rs["last_used"] else None
         return rs
 
-    def apply_to_client(self, client: AsyncClient) -> None:
+    def _auth_headers(self) -> dict[str, str]:
+        headers = {**self.headers}
+        headers["user-agent"] = self.user_agent
+        headers["content-type"] = "application/json"
+        headers["authorization"] = TOKEN
+        headers["x-twitter-active-user"] = "yes"
+        headers["x-twitter-client-language"] = "en"
+        if "ct0" in self.cookies:
+            headers["x-csrf-token"] = self.cookies["ct0"]
+        return headers
+
+    def apply_to_client(self, client: HttpClient) -> None:
         """Load this account's cookies/headers onto an existing client.
 
         Called when rotating accounts without tearing down the TCP/TLS pool.
@@ -68,23 +80,27 @@ class Account(JSONTrait):
         """
         client.cookies.clear()
         client.cookies.update(self.cookies)
-        client.headers.update(self.headers)
-        client.headers["user-agent"] = self.user_agent
-        client.headers["content-type"] = "application/json"
-        client.headers["authorization"] = TOKEN
-        client.headers["x-twitter-active-user"] = "yes"
-        client.headers["x-twitter-client-language"] = "en"
-        if "ct0" in client.cookies:
-            client.headers["x-csrf-token"] = client.cookies["ct0"]
+        headers = client.headers
+        headers.update(self.headers)
+        # curl-cffi sets its own user-agent to match the impersonated TLS
+        # fingerprint; overriding it would create a UA/fingerprint mismatch.
+        if client.backend != "curl":
+            headers["user-agent"] = self.user_agent
+        headers["content-type"] = "application/json"
+        headers["authorization"] = TOKEN
+        headers["x-twitter-active-user"] = "yes"
+        headers["x-twitter-client-language"] = "en"
+        if "ct0" in self.cookies:
+            headers["x-csrf-token"] = self.cookies["ct0"]
         else:
-            client.headers.pop("x-csrf-token", None)
+            headers.pop("x-csrf-token", None)
 
-    def make_client(self, proxy: str | None = None) -> AsyncClient:
+    def make_client(self, proxy: str | None = None) -> HttpClient:
         proxies = [proxy, os.getenv("TWS_PROXY"), self.proxy]
         proxies = [x for x in proxies if x is not None]
         proxy = parse_proxy(proxies[0]) if proxies else None
 
-        transport = AsyncHTTPTransport(retries=3)
-        client = AsyncClient(proxy=proxy, follow_redirects=True, transport=transport)
-        self.apply_to_client(client)
-        return client
+        seed = int(hashlib.sha256(self.username.encode()).hexdigest()[:8], 16)
+        return _make_http_client(
+            proxy=proxy, headers=self._auth_headers(), cookies=self.cookies, seed=seed
+        )
