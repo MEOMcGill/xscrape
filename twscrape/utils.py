@@ -238,7 +238,11 @@ def to_old_obj(obj: dict):
     if not isinstance(obj, dict):
         return obj
     if obj.get("__typename") == "User":
-        return _flatten_user_v2(obj)
+        flat = _flatten_user_v2(obj)
+        # Keep a reference to the raw (pre-flatten) payload so _capture_extras can
+        # detect changes in X's actual response shape, not our flattened dict.
+        flat["__src__"] = obj
+        return flat
     return _flatten_tweet_v2(obj)
 
 

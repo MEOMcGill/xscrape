@@ -16,6 +16,40 @@ from .utils import find_item, get_or, int_or, to_old_rep, utc
 
 _KEEP_RAW = os.getenv("XSCRAPE_KEEP_RAW", "").lower() in ("1", "true", "yes")
 
+# Known top-level keys of a RAW (pre-flatten) X user object. _capture_extras
+# compares the raw response against this so a genuinely NEW key surfaces as a
+# signal (logged once + stashed on _extras) instead of the whole nested payload
+# being flagged every run. Shared by User and UserRef (both parse user shapes).
+# When X adds a top-level field/container, it lands in _extras — that's the
+# intended change-detection hook; promote it to a real model field when you want
+# to expose it, and add its name here to quiet the alert.
+_USER_RAW_KEYS = frozenset({
+    # identity / structural
+    "__typename", "id", "id_str", "rest_id", "core", "legacy",
+    # new sub-object containers consumed by _flatten_user_v2
+    "avatar", "verification", "privacy", "profile_bio", "location",
+    "dm_permissions", "media_permissions", "relationship_perspectives",
+    # legacy-schema fields X used to send at the top level (old responses)
+    "screen_name", "name", "created_at", "description", "entities", "url", "indices",
+    "followers_count", "friends_count", "statuses_count", "favourites_count",
+    "listed_count", "media_count", "normal_followers_count", "fast_followers_count",
+    "profile_image_url_https", "profile_banner_url", "profile_image_shape",
+    "verified", "verified_type", "verification_info", "protected",
+    "pinned_tweet_ids_str", "is_blue_verified",
+    # other top-level flags X currently sends that we don't model (seen → quiet)
+    "affiliates_highlighted_label", "business_account", "can_dm", "can_media_tag",
+    "creator_subscriptions_count", "default_profile", "default_profile_image",
+    "follow_request_sent", "following", "followed_by", "has_custom_timelines",
+    "has_graduated_access", "has_hidden_subscriptions_on_profile", "has_nft_avatar",
+    "highlights_info", "is_profile_translatable", "is_translator",
+    "legacy_extended_profile", "needs_phone_verification", "notifications",
+    "parody_commentary_fan_label", "possibly_sensitive", "professional",
+    "profile_description_language", "profile_interstitial_type", "profile_sort_enabled",
+    "super_follow_eligible", "super_followed_by", "super_following",
+    "tipjar_settings", "translator_type", "time_zone", "utc_offset",
+    "want_retweets", "withheld_in_countries", "withheld_description", "withheld_scope",
+})
+
 
 @dataclass
 class JSONTrait:
@@ -231,7 +265,7 @@ class UserRef(JSONTrait):
     displayname: str
     _type: str = "snscrape.modules.twitter.UserRef"
 
-    _KNOWN_KEYS = frozenset({"id_str", "core", "screen_name", "name", "id"})
+    _KNOWN_KEYS = _USER_RAW_KEYS
 
     @staticmethod
     def parse(obj: dict):
@@ -302,33 +336,9 @@ class User(JSONTrait):
     # link: typing.Optional[TextLink] = None
     # label: typing.Optional["UserLabel"] = None
 
-    _KNOWN_KEYS = frozenset({
-        # structural / identity
-        "__typename", "id", "id_str", "rest_id", "core", "legacy",
-        # legacy fields flattened onto top-level that parse() reads
-        "screen_name", "name", "created_at", "description",
-        "followers_count", "friends_count", "statuses_count",
-        "favourites_count", "listed_count", "media_count",
-        "location", "profile_image_url_https",
-        "profile_banner_url", "verified", "protected",
-        "entities", "pinned_tweet_ids_str",
-        # top-level fields parse() reads
-        "is_blue_verified", "verified_type",
-        # known top-level fields currently sent by X but not (yet) modeled.
-        # Captured here so we don't log them on every run; promote to actual
-        # User fields when you want to expose them. Raise novelty when X adds
-        # something outside this set.
-        "affiliates_highlighted_label", "business_account", "can_dm", "can_media_tag",
-        "creator_subscriptions_count", "default_profile", "default_profile_image",
-        "fast_followers_count", "following", "has_custom_timelines",
-        "has_graduated_access", "has_hidden_subscriptions_on_profile",
-        "has_nft_avatar", "highlights_info", "is_profile_translatable",
-        "is_translator", "legacy_extended_profile", "normal_followers_count",
-        "possibly_sensitive", "professional", "profile_image_shape",
-        "profile_interstitial_type", "super_follow_eligible",
-        "tipjar_settings", "translator_type", "url",
-        "verification_info", "want_retweets", "withheld_in_countries",
-    })
+    # Capture compares against the RAW user payload (see _capture_extras); the
+    # shared raw-key set lives at module level so User and UserRef stay in sync.
+    _KNOWN_KEYS = _USER_RAW_KEYS
 
     @staticmethod
     def parse(obj: dict, res=None):
@@ -1014,9 +1024,16 @@ def _capture_extras(model, obj: dict, known) -> None:
     """
     if not isinstance(obj, dict):
         return
-    extra = {k: v for k, v in obj.items() if k not in known}
+    # Detect changes against X's RAW response shape when available: flattened
+    # user objects carry the pre-flatten payload under "__src__" (see
+    # to_old_obj). For models parsed straight from raw sub-dicts, obj is already
+    # raw. This is what lets capture flag X moving/adding a top-level container.
+    src = obj.get("__src__")
+    if src is None:
+        src = obj
+    extra = {k: v for k, v in src.items() if k not in known and k != "__src__"}
     if _KEEP_RAW:
-        object.__setattr__(model, "_raw", obj)
+        object.__setattr__(model, "_raw", src)
     if not extra:
         return
     object.__setattr__(model, "_extras", extra)
