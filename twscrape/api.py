@@ -1,5 +1,5 @@
 from contextlib import aclosing
-from typing import Literal
+from typing import Callable, Literal
 
 from .accounts_pool import AccountsPool
 from .http import Response
@@ -159,7 +159,13 @@ class API:
     # gql helpers
 
     async def _gql_items(
-        self, op: str, kv: dict, ft: dict | None = None, limit=-1, cursor_type="Bottom"
+        self,
+        op: str,
+        kv: dict,
+        ft: dict | None = None,
+        limit=-1,
+        cursor_type="Bottom",
+        stopping_condition: Callable[[Response], bool] | None = None,
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
@@ -201,6 +207,9 @@ class API:
                 empty_pages = 0
                 yield rep
 
+                if stopping_condition is not None and stopping_condition(rep):
+                    return
+
     async def _gql_item(self, op: str, kv: dict, ft: dict | None = None):
         ft = ft or {}
         queue = op.split("/")[-1]
@@ -213,7 +222,14 @@ class API:
 
     # search
 
-    async def search_raw(self, q: str, limit=-1, kv: KV = None, product: str = "Latest"):
+    async def search_raw(
+        self,
+        q: str,
+        limit=-1,
+        kv: KV = None,
+        product: str = "Latest",
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
         op = OP_SearchTimeline
         kv = {
             "rawQuery": q,
@@ -222,12 +238,29 @@ class API:
             "querySource": "typed_query",
             **(kv or {}),
         }
-        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
+        async with aclosing(
+            self._gql_items(op, kv, limit=limit, stopping_condition=stopping_condition)
+        ) as gen:
             async for x in gen:
                 yield x
 
-    async def search(self, q: str, limit=-1, kv: KV = None, product: str = "Latest"):
-        async with aclosing(self.search_raw(q, limit=limit, kv=kv, product=product)) as gen:
+    async def search(
+        self,
+        q: str,
+        limit=-1,
+        kv: KV = None,
+        product: str = "Latest",
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
+        async with aclosing(
+            self.search_raw(
+                q,
+                limit=limit,
+                kv=kv,
+                product=product,
+                stopping_condition=stopping_condition,
+            )
+        ) as gen:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x
@@ -466,7 +499,13 @@ class API:
 
     # user_tweets
 
-    async def user_tweets_raw(self, uid: int, limit=-1, kv: KV = None):
+    async def user_tweets_raw(
+        self,
+        uid: int,
+        limit=-1,
+        kv: KV = None,
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
         op = OP_UserTweets
         kv = {
             "userId": str(uid),
@@ -477,19 +516,37 @@ class API:
             "withV2Timeline": True,
             **(kv or {}),
         }
-        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
+        async with aclosing(
+            self._gql_items(op, kv, limit=limit, stopping_condition=stopping_condition)
+        ) as gen:
             async for x in gen:
                 yield x
 
-    async def user_tweets(self, uid: int, limit=-1, kv: KV = None):
-        async with aclosing(self.user_tweets_raw(uid, limit=limit, kv=kv)) as gen:
+    async def user_tweets(
+        self,
+        uid: int,
+        limit=-1,
+        kv: KV = None,
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
+        async with aclosing(
+            self.user_tweets_raw(
+                uid, limit=limit, kv=kv, stopping_condition=stopping_condition
+            )
+        ) as gen:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x
 
     # user_tweets_and_replies
 
-    async def user_tweets_and_replies_raw(self, uid: int, limit=-1, kv: KV = None):
+    async def user_tweets_and_replies_raw(
+        self,
+        uid: int,
+        limit=-1,
+        kv: KV = None,
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
         op = OP_UserTweetsAndReplies
         kv = {
             "userId": str(uid),
@@ -500,12 +557,24 @@ class API:
             "withV2Timeline": True,
             **(kv or {}),
         }
-        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
+        async with aclosing(
+            self._gql_items(op, kv, limit=limit, stopping_condition=stopping_condition)
+        ) as gen:
             async for x in gen:
                 yield x
 
-    async def user_tweets_and_replies(self, uid: int, limit=-1, kv: KV = None):
-        async with aclosing(self.user_tweets_and_replies_raw(uid, limit=limit, kv=kv)) as gen:
+    async def user_tweets_and_replies(
+        self,
+        uid: int,
+        limit=-1,
+        kv: KV = None,
+        stopping_condition: Callable[[Response], bool] | None = None,
+    ):
+        async with aclosing(
+            self.user_tweets_and_replies_raw(
+                uid, limit=limit, kv=kv, stopping_condition=stopping_condition
+            )
+        ) as gen:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x

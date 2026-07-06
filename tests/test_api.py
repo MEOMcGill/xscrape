@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from httpx import Response
 
 from twscrape.accounts_pool import NoAccountError
 from twscrape.api import API
@@ -64,3 +65,32 @@ async def test_raise_when_no_account(api_mock: API):
 
     del os.environ["TWS_RAISE_WHEN_NO_ACCOUNT"]
     assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is False
+
+
+async def test_stopping_condition_params(api_mock: API, monkeypatch):
+    """Test that stopping_condition is passed through to _gql_items."""
+    args_captured = []
+
+    def mock_gql_items(*a, **kw):
+        args_captured.append((a, kw))
+        raise MockedError()
+
+    def my_stopping_condition(rep: Response) -> bool:
+        return True
+
+    for func in ["search", "user_tweets", "user_tweets_and_replies"]:
+        args_captured.clear()
+        try:
+            monkeypatch.setattr(api_mock, "_gql_items", mock_gql_items)
+            await gather(
+                getattr(api_mock, func)(
+                    "test",
+                    limit=10,
+                    stopping_condition=my_stopping_condition,
+                )
+            )
+        except MockedError:
+            pass
+
+        assert len(args_captured) == 1, f"{func} not called once"
+        assert args_captured[0][1]["stopping_condition"] is my_stopping_condition
