@@ -10,7 +10,8 @@ data/
 data_media/
 dist/
 db_tmp
-twscrape/__pycache__/*
+__pycache__/
+*.pyc
 docs
 CLAUDE.md
 tmp
