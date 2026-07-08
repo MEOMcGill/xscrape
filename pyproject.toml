@@ -1,5 +1,5 @@
 [project]
-name = "twscrape"
+name = "xscrape"
 version = "0.18.1"
 authors = [{ name = "vladkens", email = "v.pronsky@gmail.com" }]
 description = "Twitter GraphQL and Search API implementation with SNScrape data models"
@@ -50,7 +50,10 @@ requires = ["hatchling>=1.9.1"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["twscrape"]
+# `twscrape` is the real module (kept in sync with upstream via merges);
+# `xscrape` is a thin alias package so `import xscrape` works under this
+# fork's distribution name. Ship both.
+packages = ["twscrape", "xscrape"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
