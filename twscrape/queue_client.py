@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,29 +22,64 @@ class AbortReqError(Exception): ...
 
 
 class XClIdGenStore:
-    items: dict[str, XClIdGen] = {}  # username -> XClIdGen
+    # The generator is account-agnostic: XClIdGen.calc() takes only (method, path)
+    # plus per-call time/randomness, no username. So a single instance is shared by
+    # every account in the process rather than one per username. Deriving it costs
+    # ~300 requests to abs.twimg.com (scanning bundle chunks for the sign.o-*.js
+    # indices file), so we cache it and only re-derive when it goes stale (soft TTL)
+    # or a caller reports it broken (fresh=True, driven by 404s in Ctx.req).
+    # See https://github.com/vladkens/twscrape/issues/312
+    _gen: XClIdGen | None = None
+    _created_at: float = 0.0
+    _lock = asyncio.Lock()
+
+    TTL = 3 * 60 * 60  # soft expiry (s): re-derive if the key is older than this
+    MIN_AGE = 60  # ignore a fresh=True refresh if the key is younger than this (s)
 
     @classmethod
-    async def get(cls, username: str, fresh=False) -> XClIdGen:
-        if username in cls.items and not fresh:
-            return cls.items[username]
+    async def get(cls, username: str, fresh: bool = False) -> XClIdGen:
+        # `username` is kept for signature compatibility only; the key is global.
+        # Fast path: a non-expired key exists and the caller isn't forcing a refresh.
+        if cls._gen is not None and not fresh:
+            if time.monotonic() - cls._created_at < cls.TTL:
+                return cls._gen
 
-        tries = 0
-        while tries < 3:
-            try:
-                clid_gen = await XClIdGen.create()
-                cls.items[username] = clid_gen
-                return clid_gen
-            except Exception as e:
-                tries += 1
-                logger.warning(
-                    f"XClIdGen creation attempt {tries}/3 failed: {type(e).__name__}: {e}"
-                )
-                await asyncio.sleep(1)
+        async with cls._lock:
+            # Re-check under the lock — another coroutine may have refreshed while
+            # we waited, in which case we reuse its result instead of stampeding.
+            if cls._gen is not None:
+                age = time.monotonic() - cls._created_at
+                # A fresh=True request only earns a re-derive if the current key is
+                # old enough to be worth replacing. This stops a burst of 404s from
+                # every account each triggering its own ~300-request scan.
+                if fresh and age < cls.MIN_AGE:
+                    return cls._gen
+                if not fresh and age < cls.TTL:
+                    return cls._gen
 
-        raise AbortReqError(
-            "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
-        )
+            tries = 0
+            while tries < 3:
+                try:
+                    cls._gen = await XClIdGen.create()
+                    cls._created_at = time.monotonic()
+                    return cls._gen
+                except Exception as e:
+                    tries += 1
+                    logger.warning(
+                        f"XClIdGen creation attempt {tries}/3 failed: {type(e).__name__}: {e}"
+                    )
+                    await asyncio.sleep(1)
+
+            # Derivation failed. A stale key beats aborting the request outright:
+            # the soft TTL is conservative, so an "expired" key is often still valid,
+            # and even for a 404-driven refresh the caller's own retry loop bounds it.
+            if cls._gen is not None:
+                logger.warning("XClIdGen refresh failed; falling back to cached key")
+                return cls._gen
+
+            raise AbortReqError(
+                "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+            )
 
 
 class Ctx:
