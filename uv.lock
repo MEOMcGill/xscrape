@@ -640,7 +640,7 @@ wheels = [
 
 [[package]]
 name = "xscrape"
-version = "0.18.1"
+version = "0.18.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

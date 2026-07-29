@@ -43,6 +43,33 @@ class SmokeTest:
             self.errors.append(message)
             self.log("✗", f"FAILED: {message}")
 
+    async def test_xclid_derivation(self):
+        """Test that the x-client-transaction-id generator can still be derived.
+
+        This is the canary for X changing its JS bundle layout. XClIdGen locates an
+        "indices" script by walking abs.twimg.com chunk references; when X reshuffles the
+        bundle, that walk stops finding it and EVERY request fails with "Couldn't get
+        XClientTxId indices script". Unit tests cannot catch it — conftest's autouse
+        fixture mocks the generator out entirely — so it belongs here.
+
+        Needs no accounts: the generator is account-agnostic (calc() takes only
+        method + path), so this runs even where no credentials are configured.
+        """
+        self.log("🔍", "Testing xclid derivation...")
+        try:
+            from twscrape.xclid import XClIdGen
+
+            gen = await XClIdGen.create()
+            await self.assert_true(gen is not None, "XClIdGen.create() succeeded")
+            tid = gen.calc("GET", "/i/api/graphql/foo/SearchTimeline")
+            ok = isinstance(tid, str) and len(tid) > 32
+            await self.assert_true(ok, "calc() returns a plausible transaction id")
+            self.log("  ", f"transaction id: {tid[:24]}... (len {len(tid)})")
+        except Exception as e:
+            self.failed += 1
+            self.errors.append(f"xclid_derivation: {e}")
+            self.log("✗", f"FAILED: xclid_derivation - {e}")
+
     async def test_user_by_login(self):
         """Test fetching user by username"""
         self.log("🔍", "Testing user_by_login...")
@@ -201,6 +228,11 @@ class SmokeTest:
     async def run_all(self):
         """Run all smoke tests"""
         self.log("🚀", "Starting smoke tests...\n")
+
+        # First: if the transaction-id generator can't be derived, every request below
+        # fails as a consequence. Checking it up front makes the real cause obvious.
+        await self.test_xclid_derivation()
+        print()
 
         await self.test_user_by_login()
         print()
