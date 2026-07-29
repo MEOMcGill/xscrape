@@ -1,6 +1,6 @@
 [project]
 name = "xscrape"
-version = "0.18.1"
+version = "0.18.2"
 authors = [{ name = "vladkens", email = "v.pronsky@gmail.com" }]
 description = "Twitter GraphQL and Search API implementation with SNScrape data models"
 readme = "readme.md"

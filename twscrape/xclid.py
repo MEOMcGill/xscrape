@@ -235,11 +235,29 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
 # \b guards against substring hits like `design.o-*.js`.
 INDICES_FILE_RE = re.compile(r"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js")
 
+# Any .js path referenced from inside a chunk, used to walk one level deeper when the
+# indices file isn't referenced by the chunks linked in the page (see _find_indices_url).
+CHUNK_REF_RE = re.compile(r"""["']([\w./-]*\.js)["']""")
+
+# How many levels of chunk-to-chunk references to follow. The page currently links a
+# single entry chunk and the indices file sits two hops away, so 2 covers it with one
+# level of slack; bounded so a future bundle reshuffle degrades to a clear error rather
+# than crawling abs.twimg.com indefinitely.
+_MAX_INDICES_DEPTH = 2
+
 
 async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
     # The indices file (sign.o-*.js) is not linked in the page directly — it is
-    # dynamically imported from one of the bundle chunks. Scan chunks
-    # concurrently and resolve the first reference we find, then stop.
+    # dynamically imported from a bundle chunk, and not necessarily by a chunk the page
+    # links. The legacy webpack build linked ~300 chunks and one of them referenced it
+    # directly (depth 1). The current x-web/Vite build links a single entry chunk
+    # (entry-client-logged-out-*.js) which only re-exports; the reference lives one hop
+    # further in, e.g. entry -> sentry-filter-*.js -> ./sign.o-*.js (depth 2).
+    #
+    # So: scan a level, and if nothing matched, follow the .js references found in the
+    # bodies we just read and scan those. Breadth-first, first match wins, capped at
+    # _MAX_INDICES_DEPTH. One shared semaphore keeps total concurrency bounded across
+    # levels, and each level still cancels its outstanding fetches on a hit.
     sem = asyncio.Semaphore(16)
 
     async def fetch(url: str) -> tuple[str, str]:
@@ -249,16 +267,30 @@ async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
             except Exception:
                 return url, ""
 
-    tasks = [asyncio.create_task(fetch(u)) for u in scripts]
-    try:
-        for fut in asyncio.as_completed(tasks):
-            url, body = await fut
-            m = INDICES_FILE_RE.search(body)
-            if m:
-                return urljoin(url, m.group(0))
-    finally:
-        for t in tasks:
-            t.cancel()
+    seen: set[str] = set()
+    frontier = list(dict.fromkeys(scripts))
+
+    for _ in range(_MAX_INDICES_DEPTH):
+        frontier = [u for u in frontier if u not in seen]
+        if not frontier:
+            break
+        seen.update(frontier)
+
+        next_frontier: list[str] = []
+        tasks = [asyncio.create_task(fetch(u)) for u in frontier]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                url, body = await fut
+                m = INDICES_FILE_RE.search(body)
+                if m:
+                    return urljoin(url, m.group(0))
+                # No hit in this body: remember what it imports for the next level.
+                next_frontier += [urljoin(url, r.group(1)) for r in CHUNK_REF_RE.finditer(body)]
+        finally:
+            for t in tasks:
+                t.cancel()
+
+        frontier = next_frontier
 
     raise Exception("Couldn't get XClientTxId indices script")
 
