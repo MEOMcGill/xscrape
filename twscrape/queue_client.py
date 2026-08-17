@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from .accounts_pool import Account, AccountsPool
 from .http import ConnectError, HttpClient, HttpMethod, HttpStatusError, NetworkError, Response
 from .logger import logger
-from .pacer import RequestPacer
+from .pacer import CloudflareBackoff, CloudflareBlockedError, RequestPacer, RequestStats
 from .utils import utc
 from .xclid import XClIdGen
 
@@ -20,6 +20,11 @@ class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class CloudflareBlockSignal(Exception):
+    """Internal: one response was Cloudflare-blocked. req() converts this into a
+    pool-wide backoff + retry, and into CloudflareBlockedError once retries run out."""
 
 
 class XClIdGenStore:
@@ -239,6 +244,8 @@ class QueueClient:
         if "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
             logger.warning(f"Blocked by {src}: {rep.status_code} - {req_id(rep)}")
+            if src == "Cloudflare":
+                raise CloudflareBlockSignal()
             raise AbortReqError()
 
         try:
@@ -324,7 +331,7 @@ class QueueClient:
         return await self.req("GET", url, params=params)
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
-        unknown_retry, connection_retry = 0, 0
+        unknown_retry, connection_retry, cf_retry = 0, 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -332,18 +339,31 @@ class QueueClient:
                 return None
 
             try:
-                # global pacer: every GQL request start (retries included) is spaced
-                # process-wide to stay under Cloudflare's per-IP budget
+                # Cloudflare blocks are per-IP, so all requests share one backoff
+                # deadline; the pacer then spaces every request start (retries
+                # included) process-wide to stay under Cloudflare's per-IP budget
+                await CloudflareBackoff.wait_if_blocked()
                 await RequestPacer.wait()
+                RequestStats.requests_sent += 1
                 rep = await ctx.req(method, url, params=params)
                 setattr(rep, "__username", ctx.acc.username)
                 await self._check_rep(rep)
 
+                CloudflareBackoff.record_success()
                 ctx.req_count += 1  # count only successful
                 unknown_retry, connection_retry = 0, 0
                 if self.iterate_accounts:
                     await self._rotate_ctx()
                 return rep
+            except CloudflareBlockSignal:
+                RequestStats.cf_blocks += 1
+                CloudflareBackoff.record_block()
+                cf_retry += 1
+                if cf_retry > CloudflareBackoff.max_retries():
+                    raise CloudflareBlockedError(
+                        f"Cloudflare still blocking after {cf_retry} attempts"
+                    ) from None
+                continue  # wait_if_blocked at loop top serves the backoff
             except AbortReqError:
                 # abort all queries
                 return

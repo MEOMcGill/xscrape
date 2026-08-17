@@ -3,7 +3,7 @@ import pytest
 from twscrape.accounts_pool import AccountsPool
 from twscrape.api import API
 from twscrape.logger import set_log_level
-from twscrape.pacer import RequestPacer
+from twscrape.pacer import CloudflareBackoff, RequestPacer, RequestStats
 from twscrape.queue_client import QueueClient, XClIdGenStore
 
 set_log_level("ERROR")
@@ -27,6 +27,8 @@ def no_pacing(monkeypatch):
     # the global RequestPacer would otherwise insert ~2s between every mocked request
     monkeypatch.setenv("XSCRAPE_REQ_INTERVAL", "0")
     RequestPacer.reset()
+    CloudflareBackoff.reset()
+    RequestStats.reset()
 
 
 @pytest.fixture
