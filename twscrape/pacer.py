@@ -91,9 +91,7 @@ class CloudflareBackoff:
         delay = RequestPacer._gap(step)
         cls._streak += 1
         cls._blocked_until = now + delay
-        logger.warning(
-            f"Cloudflare block #{cls._streak}: pausing ALL requests for {delay:.0f}s"
-        )
+        logger.warning(f"Cloudflare block #{cls._streak}: pausing ALL requests for {delay:.0f}s")
 
     @classmethod
     def record_success(cls) -> None:

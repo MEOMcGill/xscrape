@@ -1,3 +1,14 @@
+## v0.20.0 – 2026-08-17
+
+### Features
+- Added a global request pacer: GraphQL request starts are spaced process-wide at a jittered mean interval (`XSCRAPE_REQ_INTERVAL`, default 2.0s; `0` disables) to stay under Cloudflare's per-IP rate budget
+- Added pool-wide exponential backoff (60s→900s, jittered) when Cloudflare blocks the IP; blocked requests retry after the shared pause instead of aborting
+- Added `CloudflareBlockedError`, raised to callers (through the API generators and `gather()`) when blocks persist past `XSCRAPE_CF_MAX_RETRIES` (default 4) — previously blocked scrapes silently returned partial/empty results
+- Added `RequestStats` (`requests_sent` / `cf_blocks`) for caller-side run metrics
+- Added `get_env_float` config helper
+
+---
+
 ## v0.18.1 – 2026-05-23
 
 ### Fixes

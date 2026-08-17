@@ -22,8 +22,12 @@ async def test_cf_block_raises_after_retries(httpx_mock: HTTPXMock, client_fixtu
     _, client = client_fixture
     await client.__aenter__()
 
-    httpx_mock.add_response(url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS)
-    httpx_mock.add_response(url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS)
+    httpx_mock.add_response(
+        url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS
+    )
+    httpx_mock.add_response(
+        url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS
+    )
 
     with pytest.raises(CloudflareBlockedError):
         await client.get(URL)
@@ -37,7 +41,9 @@ async def test_cf_block_recovers_and_resets_streak(httpx_mock: HTTPXMock, client
     _, client = client_fixture
     await client.__aenter__()
 
-    httpx_mock.add_response(url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS)
+    httpx_mock.add_response(
+        url=URL, status_code=429, html="<html>blocked</html>", headers=CF_HEADERS
+    )
     httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
 
     start = time.monotonic()
