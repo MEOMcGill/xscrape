@@ -386,3 +386,13 @@ def get_env_bool(key: str, default_val: bool = False) -> bool:
     if val is None:
         return default_val
     return val.lower() in ("1", "true", "yes")
+
+
+def get_env_float(key: str, default_val: float) -> float:
+    val = os.getenv(key)
+    if val is None or not val.strip():
+        return default_val
+    try:
+        return float(val)
+    except ValueError:
+        raise ValueError(f"{key} must be a number, got {val!r}") from None

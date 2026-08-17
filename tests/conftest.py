@@ -3,6 +3,7 @@ import pytest
 from twscrape.accounts_pool import AccountsPool
 from twscrape.api import API
 from twscrape.logger import set_log_level
+from twscrape.pacer import RequestPacer
 from twscrape.queue_client import QueueClient, XClIdGenStore
 
 set_log_level("ERROR")
@@ -19,6 +20,13 @@ def mock_xclidgenstore(monkeypatch):
         return ClIdGenMock()
 
     monkeypatch.setattr(XClIdGenStore, "get", classmethod(mock_get))
+
+
+@pytest.fixture(autouse=True)
+def no_pacing(monkeypatch):
+    # the global RequestPacer would otherwise insert ~2s between every mocked request
+    monkeypatch.setenv("XSCRAPE_REQ_INTERVAL", "0")
+    RequestPacer.reset()
 
 
 @pytest.fixture

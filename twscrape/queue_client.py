@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from .accounts_pool import Account, AccountsPool
 from .http import ConnectError, HttpClient, HttpMethod, HttpStatusError, NetworkError, Response
 from .logger import logger
+from .pacer import RequestPacer
 from .utils import utc
 from .xclid import XClIdGen
 
@@ -331,6 +332,9 @@ class QueueClient:
                 return None
 
             try:
+                # global pacer: every GQL request start (retries included) is spaced
+                # process-wide to stay under Cloudflare's per-IP budget
+                await RequestPacer.wait()
                 rep = await ctx.req(method, url, params=params)
                 setattr(rep, "__username", ctx.acc.username)
                 await self._check_rep(rep)
