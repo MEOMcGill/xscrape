@@ -35,6 +35,11 @@ xscrape additions:
 - **Refreshed GraphQL operation IDs + GQL feature flags** (captured 2026-04-15 against live X frontend).
 - **`SuspendedUser` model.** `__typename == "UserUnavailable"` entries are parsed into a dedicated dataclass rather than writing a crash dump.
 - **Stuck-cursor detection** in paginated queries. If X returns the same bottom cursor twice we treat it as end-of-pagination instead of looping forever.
+- **Pluggable HTTP backend.** Requests go through httpx by default, or [curl_cffi](https://github.com/lexiforest/curl_cffi) when installed (the `[curl]` extra, e.g. `pip install -e ".[curl]"`), which impersonates a real browser's TLS/HTTP2 fingerprint. Force one with `TWS_HTTP_BACKEND=httpx|curl`.
+- **Per-account TLS fingerprint.** With the curl backend, each account can carry its own curl_cffi impersonate target (e.g. `chrome124`, `safari184`) via a private `x-tws-impersonate` header stored with the account, so a pool doesn't present one identical JA3/HTTP2 fingerprint across every "browser". The hint is validated and stripped before anything goes on the wire.
+- **`X-Client-Transaction-Id` generation.** Computes the transaction ID X requires on GraphQL calls, with one shared generator per process so N accounts don't each re-fetch X's homepage and animation sprites.
+- **Global request pacer.** GraphQL request *starts* are spaced process-wide at a jittered mean interval (`XSCRAPE_REQ_INTERVAL`, default 2 s, `0` disables) — X's Cloudflare rate rule is per-IP, so account rotation alone can't avoid it.
+- **Cloudflare block backoff.** On a Cloudflare 429 wall, the whole pool backs off with increasing delays; if the block persists past `XSCRAPE_CF_MAX_RETRIES` attempts, a `CloudflareBlockedError` is raised out of the generators so "blocked" is distinguishable from "no more data".
 
 ## Usage
 
@@ -214,17 +219,6 @@ twscrape --db test-accounts.db <command>
 
 X paginates with a fixed page size per endpoint that the caller can't change. `--limit` / `limit=` is a *floor* — the scraper returns no fewer than that many items if they exist, but often a handful more (whatever the last page yields).
 
-## Batch scraping
-
-`tmp/slopaganda/run_searches.py` is a batch-runner that reads a YAML config (same shape as the `keyword_searches.py` collections from the original scraper repo) and fans out searches with bounded concurrency.
-
-```sh
-python tmp/slopaganda/run_searches.py tmp/slopaganda/my_config.yaml --dry-run
-python tmp/slopaganda/run_searches.py tmp/slopaganda/my_config.yaml --concurrency 8
-```
-
-Supports `iterate_through_accounts` from the YAML, `--concurrency`, resumable `.jsonl` output (existing files are skipped unless `--overwrite`), and writes via `.partial` + rename so a crash doesn't corrupt output.
-
 ## Proxy
 
 Four ways to configure proxies, highest to lowest priority:
@@ -241,6 +235,10 @@ _Note:_ an unreachable proxy raises from inside the API client.
 - `TWS_PROXY` — global proxy (e.g. `socks5://user:pass@127.0.0.1:1080`)
 - `TWS_WAIT_EMAIL_CODE` — seconds to wait for the email verification code (default `30`)
 - `TWS_RAISE_WHEN_NO_ACCOUNT` — raise `NoAccountError` instead of waiting when every account is locked (`false`/`0`/`true`/`1`, default `false`)
+- `TWS_HTTP_BACKEND` — force the HTTP backend: `curl` or `httpx` (default: curl_cffi if installed, else httpx)
+- `TWS_LOG_LEVEL` — log level (default `INFO`)
+- `XSCRAPE_REQ_INTERVAL` — xscrape: mean seconds between GraphQL request starts, process-wide (default `2.0`, `0` disables pacing)
+- `XSCRAPE_CF_MAX_RETRIES` — xscrape: pool-wide backoff attempts on a Cloudflare 429 block before raising `CloudflareBlockedError` (default `4`)
 - `XSCRAPE_KEEP_RAW` — xscrape: when truthy, every parsed model keeps the full input dict on `model._raw`. Off by default because it's heavy for million-scale scraping. Useful when debugging parser drift surfaced by `model.extras`.
 
 ## Rate-limit spread configuration
@@ -262,7 +260,7 @@ pool = AccountsPool("accounts.db", endpoint_spreads={"SearchTimeline": 30})
 
 ## Limitations
 
-- X rotates GraphQL operation IDs on every frontend deploy. xscrape ships a recent snapshot but has no auto-updater yet (tracked in `CLAUDE.md`). Symptoms of drift: empty Latest-tab search results, missing user fields, or `.extras` suddenly starting to log. The first occurrence of each unmodeled key logs one INFO line (`xscrape: unknown top-level key on User: …`) and is accessible via `model.extras`.
+- X rotates GraphQL operation IDs on every frontend deploy. xscrape ships a recent snapshot but has no auto-updater yet. Symptoms of drift: empty Latest-tab search results, missing user fields, or `.extras` suddenly starting to log. The first occurrence of each unmodeled key logs one INFO line (`xscrape: unknown top-level key on User: …`) and is accessible via `model.extras`.
 - `user_tweets` / `user_tweets_and_replies` cap around ~3200 tweets per user (X limit).
 - Rate limits vary by account age and verification status — enabling `iterate_accounts` spreads pressure across the pool but can't raise per-account ceilings.
 

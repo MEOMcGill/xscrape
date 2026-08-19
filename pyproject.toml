@@ -1,7 +1,10 @@
 [project]
 name = "xscrape"
 version = "0.21.0"
-authors = [{ name = "vladkens", email = "v.pronsky@gmail.com" }]
+authors = [
+  { name = "Mika Desblancs-Patel", email = "mika.desblancs@mcgill.ca" },
+  { name = "vladkens", email = "v.pronsky@gmail.com" },
+]
 description = "Twitter GraphQL and Search API implementation with SNScrape data models"
 readme = "readme.md"
 requires-python = ">=3.10"
@@ -40,7 +43,7 @@ dev = [
 ]
 
 [project.urls]
-repository = "https://github.com/vladkens/twscrape"
+repository = "https://github.com/MEOMcGill/xscrape"
 
 [project.scripts]
 twscrape = "twscrape.cli:run"
