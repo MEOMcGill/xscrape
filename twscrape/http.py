@@ -2,7 +2,7 @@ import importlib.util
 import os
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from fake_useragent import UserAgent
 
@@ -137,6 +137,9 @@ class HttpxClient(HttpClient):
         self._httpx = httpx
         transport = AsyncHTTPTransport(retries=3)
         resolved_headers = dict(headers or {})
+        # x-tws-impersonate is a private per-account hint for the curl backend;
+        # it must never travel on the wire in httpx mode.
+        resolved_headers.pop("x-tws-impersonate", None)
         ua_string, _ = _resolve_browser(resolved_headers.get("user-agent"), seed=seed)
         resolved_headers["user-agent"] = ua_string
         self._client = httpx.AsyncClient(
@@ -156,6 +159,10 @@ class HttpxClient(HttpClient):
         return self._client.headers
 
     async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
+        # apply_to_client re-injects x-tws-impersonate onto the session headers on
+        # every rotation; drop it here so the private hint never leaks in httpx mode.
+        if "x-tws-impersonate" in self._client.headers:
+            del self._client.headers["x-tws-impersonate"]
         return await self._wrap(self._client.request(method, url, **kwargs))
 
     async def aclose(self) -> None:
@@ -180,10 +187,23 @@ class CurlClient(HttpClient):
         from curl_cffi.requests import AsyncSession, BrowserTypeLiteral
 
         _, family = _resolve_browser((headers or {}).get("user-agent"))
-        # strip user-agent — curl_cffi sets its own UA for the impersonated profile
-        safe_headers = {k: v for k, v in (headers or {}).items() if k.lower() != "user-agent"}
+        # Valid impersonate targets for the installed curl_cffi; used to reject a
+        # stale/unknown target (e.g. after a curl_cffi bump) and fall back safely.
+        self._valid_targets = set(get_args(BrowserTypeLiteral))
+        self._default_target = family
+        # Per-account target: a specific curl_cffi profile drives the JA3/HTTP2
+        # fingerprint, so accounts can differ beyond the (stripped) user-agent.
+        target = (headers or {}).get("x-tws-impersonate")
+        self._impersonate = target if target in self._valid_targets else family
+        # strip user-agent — curl_cffi sets its own UA for the impersonated profile;
+        # strip x-tws-impersonate — it's a private hint, never sent on the wire.
+        safe_headers = {
+            k: v
+            for k, v in (headers or {}).items()
+            if k.lower() not in ("user-agent", "x-tws-impersonate")
+        }
         self._session = AsyncSession(
-            impersonate=cast(BrowserTypeLiteral, family),
+            impersonate=cast(BrowserTypeLiteral, self._impersonate),
             proxy=proxy,
             allow_redirects=True,
             headers=safe_headers,
@@ -200,6 +220,18 @@ class CurlClient(HttpClient):
         return self._session.headers
 
     async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
+        # The per-account impersonate target rides in the persistent session
+        # headers — set at construction and re-injected on every rotation by
+        # Account.apply_to_client (which reuses this session without a TLS-pool
+        # rebuild). Consume it here so the JA3 tracks the *active* account rather
+        # than freezing on the first one, and so the hint never hits the wire.
+        target = self._session.headers.get("x-tws-impersonate")
+        if target is not None:
+            del self._session.headers["x-tws-impersonate"]
+            self._impersonate = (
+                target if target in self._valid_targets else self._default_target
+            )
+        kwargs.setdefault("impersonate", cast(Any, self._impersonate))
         last_err: Exception | None = None
         for _ in range(_CURL_MAX_RETRIES + 1):
             try:
