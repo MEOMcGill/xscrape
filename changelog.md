@@ -1,3 +1,10 @@
+## v0.21.0 – 2026-08-19
+
+### Features
+- Added per-account TLS fingerprinting for the curl backend: an account can carry a specific curl_cffi impersonate target via a private `x-tws-impersonate` header (stored in accounts.db `headers`), so accounts no longer share one JA3/HTTP2 fingerprint. The target is read per request and follows account rotation on a reused session; it is validated against the installed curl_cffi (invalid falls back to the UA-derived family) and stripped from the wire in both the curl and httpx backends
+
+---
+
 ## v0.20.0 – 2026-08-17
 
 ### Features
