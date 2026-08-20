@@ -1,6 +1,6 @@
 # xscrape
 
-X (Twitter) GraphQL API client with SNScrape-style data models. Fork of [twscrape](https://github.com/vladkens/twscrape) with additions for per-request account rotation, forward-compatible model parsing, endpoint-specific rate-limit spreading, and a few extra API methods (`user_about`, trends, `relogin_all`, etc.).
+X (Twitter) GraphQL API client with SNScrape-style data models. Fork of [twscrape](https://github.com/vladkens/twscrape) with additions for per-request account rotation, forward-compatible model parsing, endpoint-specific rate-limit spreading, per-IP request pacing with Cloudflare-block backoff, and per-account TLS fingerprints.
 
 The Python package is still imported as `import twscrape` to stay drop-in compatible with the upstream; only the repo and this README are re-branded.
 
@@ -22,22 +22,20 @@ Inherited from twscrape:
 - Saving/restoring account sessions to SQLite
 - Raw API responses & SNScrape-compatible models
 - Automatic account switching to smooth rate limits
+- `user_about()` / `AccountAbout`, trends (`trends`, `search_trend` + models)
+- Pluggable HTTP backend: httpx by default, or [curl_cffi](https://github.com/lexiforest/curl_cffi) when installed (the `[curl]` extra), which impersonates a real browser's TLS/HTTP2 fingerprint; force one with `TWS_HTTP_BACKEND=httpx|curl`
+- `X-Client-Transaction-Id` generation with one shared generator per process
+- Stuck-cursor detection — a repeated bottom cursor ends pagination instead of looping forever
 
 xscrape additions:
 - **Endpoint-specific rate-limit distribution.** Per-endpoint lock delays sampled from a Gaussian (15% variance) instead of a fixed 15-minute lockout. Config lives in `AccountsPool.endpoint_to_spread` (e.g. SearchTimeline → 60s mean, Followers → 120s). See the [Rate-limit spread](#rate-limit-spread-configuration) section below.
 - **Per-request account rotation within a single query.** `API(..., iterate_accounts=True)` swaps cookies/headers on the existing HTTP client after every successful paginated request, so each page of a long search/listing goes out as a different logged-in user. The TCP/TLS connection pool stays warm across rotations (no extra handshake).
 - **Forward-compatible parsing.** Any top-level API field the parser doesn't explicitly consume is captured on `model.extras` instead of being silently dropped. The first occurrence of each `(model, key)` pair logs one INFO line to surface drift. Set `XSCRAPE_KEEP_RAW=1` to also stash the full raw response dict on `model._raw` when debugging parser drift.
 - **`product` parameter on search.** `api.search(q, product="Top")` — Top / Latest / People / Photos / Videos. Default is `"Latest"`.
-- **`user_about()` API + `AccountAbout` model.** Fetches location, affiliates, verification info, and username-change history from the X about-profile endpoint.
-- **Trends support.** `api.trends(id)` with convenient category aliases (`"trending"`, `"news"`, `"sport"`, `"entertainment"`) plus `search_trend()`. `Trend` / `GroupedTrend` / `TrendMetadata` / `TrendUrl` models.
 - **`relogin_all()` + CLI `relogin` with no usernames** to re-login every account in one command.
 - **Required-field validation on `User`.** `get_required()` raises `KeyError` on missing critical fields instead of producing a half-parsed object.
-- **Refreshed GraphQL operation IDs + GQL feature flags** (captured 2026-04-15 against live X frontend).
 - **`SuspendedUser` model.** `__typename == "UserUnavailable"` entries are parsed into a dedicated dataclass rather than writing a crash dump.
-- **Stuck-cursor detection** in paginated queries. If X returns the same bottom cursor twice we treat it as end-of-pagination instead of looping forever.
-- **Pluggable HTTP backend.** Requests go through httpx by default, or [curl_cffi](https://github.com/lexiforest/curl_cffi) when installed (the `[curl]` extra, e.g. `pip install -e ".[curl]"`), which impersonates a real browser's TLS/HTTP2 fingerprint. Force one with `TWS_HTTP_BACKEND=httpx|curl`.
-- **Per-account TLS fingerprint.** With the curl backend, each account can carry its own curl_cffi impersonate target (e.g. `chrome124`, `safari184`) via a private `x-tws-impersonate` header stored with the account, so a pool doesn't present one identical JA3/HTTP2 fingerprint across every "browser". The hint is validated and stripped before anything goes on the wire.
-- **`X-Client-Transaction-Id` generation.** Computes the transaction ID X requires on GraphQL calls, with one shared generator per process so N accounts don't each re-fetch X's homepage and animation sprites.
+- **Per-account TLS fingerprint.** With the curl backend, each account can carry its own curl_cffi impersonate target (e.g. `chrome124`, `safari184`) via a private `x-tws-impersonate` header stored with the account, so a pool doesn't present one identical JA3/HTTP2 fingerprint across every "browser" (upstream impersonates at browser-family level only). The hint is validated and stripped before anything goes on the wire.
 - **Global request pacer.** GraphQL request *starts* are spaced process-wide at a jittered mean interval (`XSCRAPE_REQ_INTERVAL`, default 2 s, `0` disables) — X's Cloudflare rate rule is per-IP, so account rotation alone can't avoid it.
 - **Cloudflare block backoff.** On a Cloudflare 429 wall, the whole pool backs off with increasing delays; if the block persists past `XSCRAPE_CF_MAX_RETRIES` attempts, a `CloudflareBlockedError` is raised out of the generators so "blocked" is distinguishable from "no more data".
 
@@ -77,7 +75,7 @@ async def main():
 
     await api.user_by_login("xdevelopers")            # -> User
     await api.user_by_id(2244994945)                  # -> User
-    await api.user_about("xdevelopers")               # -> AccountAbout (xscrape)
+    await api.user_about("xdevelopers")               # -> AccountAbout
 
     user_id = 2244994945
     await gather(api.following(user_id, limit=20))
@@ -187,7 +185,7 @@ twscrape tweet_replies TWEET_ID --limit=20
 twscrape retweeters TWEET_ID --limit=20
 twscrape user_by_id USER_ID
 twscrape user_by_login USERNAME
-twscrape user_about USERNAME            # xscrape
+twscrape user_about USERNAME
 twscrape following USER_ID --limit=20
 twscrape followers USER_ID --limit=20
 twscrape verified_followers USER_ID --limit=20
