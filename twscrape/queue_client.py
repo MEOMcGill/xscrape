@@ -8,7 +8,13 @@ from urllib.parse import urlparse
 from .accounts_pool import Account, AccountsPool
 from .http import ConnectError, HttpClient, HttpMethod, HttpStatusError, NetworkError, Response
 from .logger import logger
-from .pacer import CloudflareBackoff, CloudflareBlockedError, RequestPacer, RequestStats
+from .pacer import (
+    CloudflareBackoff,
+    CloudflareBlockedError,
+    EndpointRejectedError,
+    RequestPacer,
+    RequestStats,
+)
 from .utils import utc
 from .xclid import XClIdGen
 
@@ -16,10 +22,22 @@ ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
 
+# A gated account is parked this long before search retries it. Short enough to recover on
+# its own if X lifts the restriction, long enough not to re-burn a request (and three
+# transaction-id attempts) on a permanently gated account every few seconds.
+TID_404_LOCK_SECONDS = 60 * 15
+# Past this many consecutive gated accounts, stop blaming the accounts and say so.
+TID_404_MAX_ACCOUNTS = 5
+
+
 class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class TxIdRejectedError(Exception):
+    """This account got a 404 from this endpoint even after fresh transaction ids."""
 
 
 class CloudflareBlockSignal(Exception):
@@ -114,9 +132,7 @@ class Ctx:
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
             await asyncio.sleep(1)
 
-        raise AbortReqError(
-            "Faield to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
-        )
+        raise TxIdRejectedError()
 
 
 def req_id(rep: Response):
@@ -331,7 +347,7 @@ class QueueClient:
         return await self.req("GET", url, params=params)
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
-        unknown_retry, connection_retry, cf_retry = 0, 0, 0
+        unknown_retry, connection_retry, cf_retry, tid_404 = 0, 0, 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -364,6 +380,21 @@ class QueueClient:
                         f"Cloudflare still blocking after {cf_retry} attempts"
                     ) from None
                 continue  # wait_if_blocked at loop top serves the backoff
+            except TxIdRejectedError:
+                # An empty-bodied 404 with healthy rate-limit headers means X denies this
+                # account this endpoint; retrying it is futile, so park it (per-queue, so it
+                # stays usable elsewhere) and take the next account. Without this the whole
+                # query aborted on the first gated account -- and since the pool hands out
+                # accounts least-recently-used first, one gated account at the head of the
+                # queue silently zeroed every search.
+                tid_404 += 1
+                if tid_404 > TID_404_MAX_ACCOUNTS:
+                    raise EndpointRejectedError(
+                        f"{self.queue}: empty 404 from {tid_404} accounts in a row -- "
+                        "the operation id is probably stale, not the accounts"
+                    ) from None
+                await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
+                continue
             except AbortReqError:
                 # abort all queries
                 return
