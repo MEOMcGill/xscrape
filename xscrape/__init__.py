@@ -12,6 +12,7 @@ from twscrape import (
     Account,
     AccountsPool,
     CloudflareBlockedError,
+    EndpointRejectedError,
     ConnectError,
     HttpError,
     HttpStatusError,
