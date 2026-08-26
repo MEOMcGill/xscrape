@@ -37,7 +37,7 @@ OP_GenericTimelineById = "VrAHfTlEBd6qq1IJlOvBqQ/GenericTimelineById"
 OP_ListLatestTweetsTimeline = "Iql5aRVyFxNZ-ORcDV_TwQ/ListLatestTweetsTimeline"
 OP_ListMembers = "kcsJubZ1BIwpdKrYfiNRtg/ListMembers"
 OP_Retweeters = "gClaCb5tCk0z2iwAis8CwA/Retweeters"
-OP_SearchTimeline = "Bcw3RzK-PatNAmbnw54hFw/SearchTimeline"
+OP_SearchTimeline = "hyPfJYJ_XAtDYoslQc-Rgg/SearchTimeline"
 OP_TweetDetail = "jd3V43oDY9cY7obs1YMfbQ/TweetDetail"
 OP_UserByRestId = "DaeC_2LfMgwCujE03HSZtw/UserByRestId"
 OP_UserByScreenName = "2qvSHpkWTMS9i0zJAwDNiA/UserByScreenName"
@@ -180,7 +180,10 @@ class API:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
                     params["variables"]["cursor"] = cur
-                if queue in ("SearchTimeline", "ListLatestTweetsTimeline"):
+                # SearchTimeline dropped fieldToggles: X's current build 404s the request when
+                # it is present (verified 2026-08-26 -- the browser sends variables+features
+                # only, and replaying that URL returns 200 while adding fieldToggles 404s).
+                if queue in ("ListLatestTweetsTimeline",):
                     params["fieldToggles"] = {"withArticleRichContentState": False}
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
