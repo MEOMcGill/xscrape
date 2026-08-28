@@ -309,8 +309,15 @@ class QueueClient:
             raise HandledError()
 
         if err_msg == "OK" and rep.status_code == 403:
+            # Deactivation is sticky until someone logs the account back in, so record WHY.
+            # msg=None used to leave error_msg NULL, making a 403 deactivation indistinguishable
+            # from an account that was never touched -- 19 accounts vanished from a pool this
+            # way with no trace of the cause. The queue is worth keeping too: 403 may prove to
+            # be endpoint-specific (as the empty-bodied 404 turned out to be), and that is only
+            # checkable if the endpoint was written down.
+            msg = f"(403) Forbidden, empty error body, on {self.queue}"
             logger.warning(f"Session expired or banned: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=None)
+            await self._close_ctx(-1, inactive=True, msg=msg)
             raise HandledError()
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80
