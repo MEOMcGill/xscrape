@@ -13,6 +13,7 @@ class CloudflareBlockedError(Exception):
     generators) instead of silently returning partial results, so callers can
     tell "blocked" apart from "no more data"."""
 
+
 class EndpointRejectedError(Exception):
     """Raised when consecutive accounts all get an empty-bodied 404 from one GraphQL
     endpoint. One account being denied is normal (X gates some endpoints per account);
@@ -20,7 +21,6 @@ class EndpointRejectedError(Exception):
     request shape is stale. Kept distinct so callers can tell "these accounts are gated"
     from "this endpoint is broken for everyone", which is otherwise indistinguishable: the
     404 body is empty and the rate-limit headers look healthy."""
-
 
 
 class RequestPacer:

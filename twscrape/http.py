@@ -228,9 +228,7 @@ class CurlClient(HttpClient):
         target = self._session.headers.get("x-tws-impersonate")
         if target is not None:
             del self._session.headers["x-tws-impersonate"]
-            self._impersonate = (
-                target if target in self._valid_targets else self._default_target
-            )
+            self._impersonate = target if target in self._valid_targets else self._default_target
         kwargs.setdefault("impersonate", cast(Any, self._impersonate))
         last_err: Exception | None = None
         for _ in range(_CURL_MAX_RETRIES + 1):

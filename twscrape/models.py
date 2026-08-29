@@ -23,32 +23,89 @@ _KEEP_RAW = os.getenv("XSCRAPE_KEEP_RAW", "").lower() in ("1", "true", "yes")
 # When X adds a top-level field/container, it lands in _extras — that's the
 # intended change-detection hook; promote it to a real model field when you want
 # to expose it, and add its name here to quiet the alert.
-_USER_RAW_KEYS = frozenset({
-    # identity / structural
-    "__typename", "id", "id_str", "rest_id", "core", "legacy",
-    # new sub-object containers consumed by _flatten_user_v2
-    "avatar", "verification", "privacy", "profile_bio", "location",
-    "dm_permissions", "media_permissions", "relationship_perspectives",
-    # legacy-schema fields X used to send at the top level (old responses)
-    "screen_name", "name", "created_at", "description", "entities", "url", "indices",
-    "followers_count", "friends_count", "statuses_count", "favourites_count",
-    "listed_count", "media_count", "normal_followers_count", "fast_followers_count",
-    "profile_image_url_https", "profile_banner_url", "profile_image_shape",
-    "verified", "verified_type", "verification_info", "protected",
-    "pinned_tweet_ids_str", "is_blue_verified",
-    # other top-level flags X currently sends that we don't model (seen → quiet)
-    "affiliates_highlighted_label", "business_account", "can_dm", "can_media_tag",
-    "creator_subscriptions_count", "default_profile", "default_profile_image",
-    "follow_request_sent", "following", "followed_by", "has_custom_timelines",
-    "has_graduated_access", "has_hidden_subscriptions_on_profile", "has_nft_avatar",
-    "highlights_info", "is_profile_translatable", "is_translator",
-    "legacy_extended_profile", "needs_phone_verification", "notifications",
-    "parody_commentary_fan_label", "possibly_sensitive", "professional",
-    "profile_description_language", "profile_interstitial_type", "profile_sort_enabled",
-    "super_follow_eligible", "super_followed_by", "super_following",
-    "tipjar_settings", "translator_type", "time_zone", "utc_offset",
-    "want_retweets", "withheld_in_countries", "withheld_description", "withheld_scope",
-})
+_USER_RAW_KEYS = frozenset(
+    {
+        # identity / structural
+        "__typename",
+        "id",
+        "id_str",
+        "rest_id",
+        "core",
+        "legacy",
+        # new sub-object containers consumed by _flatten_user_v2
+        "avatar",
+        "verification",
+        "privacy",
+        "profile_bio",
+        "location",
+        "dm_permissions",
+        "media_permissions",
+        "relationship_perspectives",
+        # legacy-schema fields X used to send at the top level (old responses)
+        "screen_name",
+        "name",
+        "created_at",
+        "description",
+        "entities",
+        "url",
+        "indices",
+        "followers_count",
+        "friends_count",
+        "statuses_count",
+        "favourites_count",
+        "listed_count",
+        "media_count",
+        "normal_followers_count",
+        "fast_followers_count",
+        "profile_image_url_https",
+        "profile_banner_url",
+        "profile_image_shape",
+        "verified",
+        "verified_type",
+        "verification_info",
+        "protected",
+        "pinned_tweet_ids_str",
+        "is_blue_verified",
+        # other top-level flags X currently sends that we don't model (seen → quiet)
+        "affiliates_highlighted_label",
+        "business_account",
+        "can_dm",
+        "can_media_tag",
+        "creator_subscriptions_count",
+        "default_profile",
+        "default_profile_image",
+        "follow_request_sent",
+        "following",
+        "followed_by",
+        "has_custom_timelines",
+        "has_graduated_access",
+        "has_hidden_subscriptions_on_profile",
+        "has_nft_avatar",
+        "highlights_info",
+        "is_profile_translatable",
+        "is_translator",
+        "legacy_extended_profile",
+        "needs_phone_verification",
+        "notifications",
+        "parody_commentary_fan_label",
+        "possibly_sensitive",
+        "professional",
+        "profile_description_language",
+        "profile_interstitial_type",
+        "profile_sort_enabled",
+        "super_follow_eligible",
+        "super_followed_by",
+        "super_following",
+        "tipjar_settings",
+        "translator_type",
+        "time_zone",
+        "utc_offset",
+        "want_retweets",
+        "withheld_in_countries",
+        "withheld_description",
+        "withheld_scope",
+    }
+)
 
 
 @dataclass
@@ -165,13 +222,21 @@ class AccountAbout(JSONTrait):
     is_identity_verified: bool | None
     verified_since_msec: int | None
 
-    _KNOWN_KEYS = frozenset({
-        "about_profile", "core", "verification_info", "rest_id",
-        # fallbacks read from top-level via get_required:
-        "screen_name", "name",
-        # structural keys present after to_old_obj flattening:
-        "id", "id_str", "legacy",
-    })
+    _KNOWN_KEYS = frozenset(
+        {
+            "about_profile",
+            "core",
+            "verification_info",
+            "rest_id",
+            # fallbacks read from top-level via get_required:
+            "screen_name",
+            "name",
+            # structural keys present after to_old_obj flattening:
+            "id",
+            "id_str",
+            "legacy",
+        }
+    )
 
     @staticmethod
     def parse(obj: dict):
@@ -207,6 +272,7 @@ class AccountAbout(JSONTrait):
         )
         _capture_extras(inst, obj, AccountAbout._KNOWN_KEYS)
         return inst
+
 
 @dataclass
 class CommunityRule(JSONTrait):
@@ -253,8 +319,6 @@ class Community(JSONTrait):
             topicName=topic.get("topic_name"),
             isNsfw=obj.get("is_nsfw"),
         )
-
-
 
 
 @dataclass
@@ -437,31 +501,69 @@ class Tweet(JSONTrait):
     # renderedContent: str
     # vibe: Optional["Vibe"] = None
 
-    _KNOWN_KEYS = frozenset({
-        # structural / identity
-        "id", "id_str", "rest_id", "core", "legacy", "__typename",
-        # top-level fields parse() reads directly
-        "user_id_str", "created_at", "lang", "full_text",
-        "reply_count", "retweet_count", "favorite_count", "quote_count",
-        "bookmark_count", "conversation_id_str",
-        "entities", "extended_entities", "note_tweet",
-        "place", "coordinates", "geo",
-        "in_reply_to_status_id_str", "in_reply_to_user_id_str",
-        "in_reply_to_screen_name",
-        "source", "possibly_sensitive", "card",
-        "views", "ext_views",
-        "retweeted_status_id_str", "retweeted_status_result",
-        "quoted_status_id_str", "quoted_status_result",
-        # known top-level fields X currently sends but parser doesn't consume
-        # — silenced to keep steady-state logs clean; promote to Tweet fields
-        # when you want to expose them.
-        "article", "birdwatch_pivot", "bookmarked", "conversation_control",
-        "display_text_range", "edit_control", "edit_perspective", "favorited",
-        "has_birdwatch_notes", "is_quote_status", "is_translatable",
-        "limited_actions", "possibly_sensitive_editable", "previous_counts",
-        "quick_promote_eligibility", "quoted_status_permalink", "quotedRefResult",
-        "retweeted", "scopes", "unmention_data",
-    })
+    _KNOWN_KEYS = frozenset(
+        {
+            # structural / identity
+            "id",
+            "id_str",
+            "rest_id",
+            "core",
+            "legacy",
+            "__typename",
+            # top-level fields parse() reads directly
+            "user_id_str",
+            "created_at",
+            "lang",
+            "full_text",
+            "reply_count",
+            "retweet_count",
+            "favorite_count",
+            "quote_count",
+            "bookmark_count",
+            "conversation_id_str",
+            "entities",
+            "extended_entities",
+            "note_tweet",
+            "place",
+            "coordinates",
+            "geo",
+            "in_reply_to_status_id_str",
+            "in_reply_to_user_id_str",
+            "in_reply_to_screen_name",
+            "source",
+            "possibly_sensitive",
+            "card",
+            "views",
+            "ext_views",
+            "retweeted_status_id_str",
+            "retweeted_status_result",
+            "quoted_status_id_str",
+            "quoted_status_result",
+            # known top-level fields X currently sends but parser doesn't consume
+            # — silenced to keep steady-state logs clean; promote to Tweet fields
+            # when you want to expose them.
+            "article",
+            "birdwatch_pivot",
+            "bookmarked",
+            "conversation_control",
+            "display_text_range",
+            "edit_control",
+            "edit_perspective",
+            "favorited",
+            "has_birdwatch_notes",
+            "is_quote_status",
+            "is_translatable",
+            "limited_actions",
+            "possibly_sensitive_editable",
+            "previous_counts",
+            "quick_promote_eligibility",
+            "quoted_status_permalink",
+            "quotedRefResult",
+            "retweeted",
+            "scopes",
+            "unmention_data",
+        }
+    )
 
     @staticmethod
     def parse(obj: dict, res: dict):
@@ -541,12 +643,28 @@ class Tweet(JSONTrait):
 class MediaPhoto(JSONTrait):
     url: str
 
-    _KNOWN_KEYS = frozenset({
-        "media_url_https", "type", "id", "id_str", "display_url", "expanded_url",
-        "indices", "url", "features", "sizes", "original_info",
-        "media_key", "ext_media_availability", "ext_alt_text", "source_user_id",
-        "source_user_id_str", "source_status_id", "source_status_id_str",
-    })
+    _KNOWN_KEYS = frozenset(
+        {
+            "media_url_https",
+            "type",
+            "id",
+            "id_str",
+            "display_url",
+            "expanded_url",
+            "indices",
+            "url",
+            "features",
+            "sizes",
+            "original_info",
+            "media_key",
+            "ext_media_availability",
+            "ext_alt_text",
+            "source_user_id",
+            "source_user_id_str",
+            "source_status_id",
+            "source_status_id_str",
+        }
+    )
 
     @staticmethod
     def parse(obj: dict):
@@ -562,13 +680,30 @@ class MediaVideo(JSONTrait):
     duration: int
     views: int | None = None
 
-    _KNOWN_KEYS = frozenset({
-        "media_url_https", "video_info", "mediaStats", "type",
-        "id", "id_str", "display_url", "expanded_url", "indices", "url",
-        "features", "sizes", "original_info", "media_key",
-        "ext_media_availability", "additional_media_info",
-        "source_user_id", "source_user_id_str", "source_status_id", "source_status_id_str",
-    })
+    _KNOWN_KEYS = frozenset(
+        {
+            "media_url_https",
+            "video_info",
+            "mediaStats",
+            "type",
+            "id",
+            "id_str",
+            "display_url",
+            "expanded_url",
+            "indices",
+            "url",
+            "features",
+            "sizes",
+            "original_info",
+            "media_key",
+            "ext_media_availability",
+            "additional_media_info",
+            "source_user_id",
+            "source_user_id_str",
+            "source_status_id",
+            "source_status_id_str",
+        }
+    )
 
     @staticmethod
     def parse(obj: dict):
@@ -589,12 +724,24 @@ class MediaAnimated(JSONTrait):
     thumbnailUrl: str
     videoUrl: str
 
-    _KNOWN_KEYS = frozenset({
-        "media_url_https", "video_info", "type",
-        "id", "id_str", "display_url", "expanded_url", "indices", "url",
-        "features", "sizes", "original_info", "media_key",
-        "ext_media_availability",
-    })
+    _KNOWN_KEYS = frozenset(
+        {
+            "media_url_https",
+            "video_info",
+            "type",
+            "id",
+            "id_str",
+            "display_url",
+            "expanded_url",
+            "indices",
+            "url",
+            "features",
+            "sizes",
+            "original_info",
+            "media_key",
+            "ext_media_availability",
+        }
+    )
 
     @staticmethod
     def parse(obj: dict):
@@ -729,8 +876,7 @@ class TrendUrl(JSONTrait):
             url=obj["url"],
             urlType=obj["urlType"],
             urlEndpointOptions=[
-                RequestParam(key=x["key"], value=x["value"])
-                for x in urt.get("requestParams", [])
+                RequestParam(key=x["key"], value=x["value"]) for x in urt.get("requestParams", [])
             ],
         )
         _capture_extras(inst, obj, TrendUrl._KNOWN_KEYS)
@@ -1162,6 +1308,7 @@ def parse_about(rep: Response | dict) -> AccountAbout | None:
     except Exception as e:
         logger.error(f"Failed to parse about profile - {type(e)}:\n{traceback.format_exc()}")
         return None
+
 
 def parse_community(rep: Response | dict) -> Community | None:
     try:

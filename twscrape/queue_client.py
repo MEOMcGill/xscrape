@@ -64,9 +64,8 @@ class XClIdGenStore:
     async def get(cls, username: str, fresh: bool = False) -> XClIdGen:
         # `username` is kept for signature compatibility only; the key is global.
         # Fast path: a non-expired key exists and the caller isn't forcing a refresh.
-        if cls._gen is not None and not fresh:
-            if time.monotonic() - cls._created_at < cls.TTL:
-                return cls._gen
+        if cls._gen is not None and not fresh and time.monotonic() - cls._created_at < cls.TTL:
+            return cls._gen
 
         async with cls._lock:
             # Re-check under the lock — another coroutine may have refreshed while
@@ -309,8 +308,15 @@ class QueueClient:
             raise HandledError()
 
         if err_msg == "OK" and rep.status_code == 403:
+            # Deactivation is sticky until someone logs the account back in, so record WHY.
+            # msg=None used to leave error_msg NULL, making a 403 deactivation indistinguishable
+            # from an account that was never touched -- 19 accounts vanished from a pool this
+            # way with no trace of the cause. The queue is worth keeping too: 403 may prove to
+            # be endpoint-specific (as the empty-bodied 404 turned out to be), and that is only
+            # checkable if the endpoint was written down.
+            msg = f"(403) Forbidden, empty error body, on {self.queue}"
             logger.warning(f"Session expired or banned: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=None)
+            await self._close_ctx(-1, inactive=True, msg=msg)
             raise HandledError()
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80

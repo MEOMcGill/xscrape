@@ -173,7 +173,7 @@ class SmokeTest:
 
             for user in followers:
                 await self.assert_true(user.id > 0, f"Follower {user.username} has ID")
-                await self.assert_true(len(user.username) > 0, f"Follower has username")
+                await self.assert_true(len(user.username) > 0, "Follower has username")
 
             self.log("  ", f"Found {len(followers)} followers")
         except Exception as e:
@@ -285,7 +285,7 @@ class SmokeTest:
             self.log("✅", f"Test passed! ({self.passed} assertions)")
             return 0
         else:
-            self.log("❌", f"Test failed")
+            self.log("❌", "Test failed")
             return 1
 
 

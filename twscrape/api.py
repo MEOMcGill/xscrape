@@ -172,9 +172,11 @@ class API:
         empty_pages = 0
 
         async with QueueClient(
-                self.pool, queue, self.debug,
-                proxy=self.proxy,
-                iterate_accounts=self.iterate_accounts,
+            self.pool,
+            queue,
+            self.debug,
+            proxy=self.proxy,
+            iterate_accounts=self.iterate_accounts,
         ) as client:
             while active:
                 params = {"variables": kv, "features": ft}
@@ -217,7 +219,10 @@ class API:
         ft = ft or {}
         queue = op.split("/")[-1]
         async with QueueClient(
-            self.pool, queue, self.debug, proxy=self.proxy,
+            self.pool,
+            queue,
+            self.debug,
+            proxy=self.proxy,
             iterate_accounts=self.iterate_accounts,
         ) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
@@ -533,9 +538,7 @@ class API:
         stopping_condition: Callable[[Response], bool] | None = None,
     ):
         async with aclosing(
-            self.user_tweets_raw(
-                uid, limit=limit, kv=kv, stopping_condition=stopping_condition
-            )
+            self.user_tweets_raw(uid, limit=limit, kv=kv, stopping_condition=stopping_condition)
         ) as gen:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
