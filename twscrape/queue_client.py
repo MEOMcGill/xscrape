@@ -64,9 +64,8 @@ class XClIdGenStore:
     async def get(cls, username: str, fresh: bool = False) -> XClIdGen:
         # `username` is kept for signature compatibility only; the key is global.
         # Fast path: a non-expired key exists and the caller isn't forcing a refresh.
-        if cls._gen is not None and not fresh:
-            if time.monotonic() - cls._created_at < cls.TTL:
-                return cls._gen
+        if cls._gen is not None and not fresh and time.monotonic() - cls._created_at < cls.TTL:
+            return cls._gen
 
         async with cls._lock:
             # Re-check under the lock — another coroutine may have refreshed while

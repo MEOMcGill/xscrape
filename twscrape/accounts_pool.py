@@ -52,8 +52,8 @@ class AccountsPool:
         "BlueVerifiedFollowers": 120,
         "UserCreatorSubscriptions": 120,
         "GenericTimelineById": 1,
-        'UserByRestId': 5,
-        'AboutAccountQuery': 18
+        "UserByRestId": 5,
+        "AboutAccountQuery": 18,
     }
     DEFAULT_SPREAD: int = 120  # Default for unknown endpoints
 
