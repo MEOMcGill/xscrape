@@ -1,6 +1,15 @@
 # xscrape
 
-X (Twitter) GraphQL API client with SNScrape-style data models. Fork of [twscrape](https://github.com/vladkens/twscrape) with additions for per-request account rotation, forward-compatible model parsing, endpoint-specific rate-limit spreading, per-IP request pacing with Cloudflare-block backoff, and per-account TLS fingerprints.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+
+Built and maintained at the [Media Ecosystem Observatory](https://mediatechdemocracy.com/en/meo/)
+for social-media research. Sibling projects: [fbscrape](https://github.com/MEOMcGill/fbscrape)
+for Facebook, [igscrape](https://github.com/MEOMcGill/igscrape) for Instagram and
+[pytok](https://github.com/networkdynamics/pytok) for TikTok.
+
+X (Twitter) GraphQL API client with SNScrape-style data models. Fork of [twscrape](https://github.com/vladkens/twscrape) with additions for per-request account rotation, forward-compatible model parsing, endpoint-specific rate-limit spreading, per-IP request pacing with Cloudflare-block backoff, and per-account TLS fingerprints. 
 
 The Python package is still imported as `import twscrape` to stay drop-in compatible with the upstream; only the repo and this README are re-branded.
 
