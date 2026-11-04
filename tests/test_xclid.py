@@ -19,8 +19,12 @@ from pytest_httpx import HTTPXMock
 from twscrape.xclid import (
     _MAX_INDICES_DEPTH,
     INDICES_FILE_RE,
+    XClIdAccountError,
+    XClIdParseError,
     _find_indices_url,
     _make_client,
+    get_scripts_list,
+    parse_anim_idx,
 )
 
 BASE = "https://abs.twimg.com/x-web/x-web"
@@ -84,3 +88,68 @@ async def test_unfetchable_chunk_does_not_abort_the_scan(httpx_mock: HTTPXMock):
 def test_depth_cap_is_bounded():
     """Guard the cap itself: unbounded recursion here means crawling abs.twimg.com."""
     assert 2 <= _MAX_INDICES_DEPTH <= 4
+
+
+# --- 2026-11-04: X stopped serving the indices script to anonymous sessions -----------------
+# Live: an anonymous fetch got the logged-out x-web entry, from which sign.o-*.js is no longer
+# reachable at any depth; a logged-in fetch got the legacy responsive-web build, whose
+# embedded chunk map names ondemand.s with a 16-hex hash. Both halves of the port are below.
+
+LEGACY = "https://abs.twimg.com/responsive-web/client-web"
+LEGACY_PAGE = (
+    f'<script src="{LEGACY}/vendor.b53dfa6ec5570e89a.js"></script>'
+    f'<script src="{LEGACY}/main.3a36e48897e341d1a.js"></script>'
+    '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'
+    # webpack's name map and hash map, as embedded in the page
+    '{20113:"ondemand.s",4127:"bundle.Grok"}[e]||e)+"."+{20113:"0123456789abcdef",'
+    '4127:"fedcba9876543210"}[e]+"a.js"'
+)
+
+
+def test_legacy_build_with_16_hex_hashes_yields_the_indices_chunk():
+    """The fork only knew 7-hex hashes, so on the logged-in (legacy) page it reconstructed
+    no chunk URLs at all and never found ondemand.s."""
+    urls = get_scripts_list(LEGACY_PAGE)
+    indices = f"{LEGACY}/ondemand.s.0123456789abcdefa.js"
+    assert indices in urls
+    assert f"{LEGACY}/main.3a36e48897e341d1a.js" in urls
+    assert [u for u in urls if INDICES_FILE_RE.search(u)] == [indices]
+
+
+def test_challenge_reference_on_a_real_app_page_is_not_an_error():
+    """The logged-in page references the challenge script too; only a page with NO app
+    scripts is the interstitial."""
+    assert get_scripts_list(LEGACY_PAGE)
+
+
+def test_cloudflare_interstitial_is_a_parse_error():
+    page = '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>'
+    with pytest.raises(XClIdParseError, match="Cloudflare challenge"):
+        get_scripts_list(page)
+
+
+def test_page_with_no_scripts_is_a_parse_error():
+    with pytest.raises(XClIdParseError):
+        get_scripts_list("<html></html>")
+
+
+@pytest.mark.asyncio
+async def test_logged_out_app_is_an_account_error():
+    """A logged-out page means the cookies did not authenticate; crawling it is futile."""
+    page = f'<script type="module" src="{ENTRY}"></script>'
+    async with _make_client() as clt:
+        with pytest.raises(XClIdAccountError):
+            await parse_anim_idx(page, clt)
+
+
+@pytest.mark.asyncio
+async def test_cookies_go_to_x_com_only(httpx_mock: HTTPXMock):
+    """Account cookies authenticate the page fetch; they must not leak to the asset CDN."""
+    httpx_mock.add_response(url="https://x.com/tesla", text="ok")
+    httpx_mock.add_response(url=INDICES, text="ok")
+    async with _make_client(cookies={"auth_token": "a", "ct0": "c"}) as clt:
+        await clt.get("https://x.com/tesla")
+        await clt.get(INDICES)
+    page_req, asset_req = httpx_mock.get_requests()
+    assert "auth_token=a" in page_req.headers.get("cookie", "")
+    assert "cookie" not in asset_req.headers
