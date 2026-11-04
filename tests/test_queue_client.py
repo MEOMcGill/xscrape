@@ -156,3 +156,33 @@ async def test_ctx_closed_on_break(httpx_mock: HTTPXMock, client_fixture: CF):
 
     # ctx should be None after break
     assert client.ctx is None
+
+
+async def test_logged_out_xclid_parks_account_and_uses_next(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """XClIdAccountError is about one account's session: park it on this queue and retry
+    with the next account, which derives the key with its own cookies."""
+    from tests.conftest import ClIdGenMock
+    from twscrape.queue_client import XClIdGenStore
+    from twscrape.xclid import XClIdAccountError
+
+    pool, client = client_fixture
+    asked: list[str] = []
+
+    async def fake_get(cls, username, cookies=None, fresh=False):
+        asked.append(username)
+        if username == "user1":
+            raise XClIdAccountError("Logged-out X web app")
+        return ClIdGenMock()
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert asked == ["user1", "user2"]
+    assert "user1" in await get_locked(pool)  # parked, not deactivated
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}

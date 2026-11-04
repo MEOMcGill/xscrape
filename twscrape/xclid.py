@@ -11,13 +11,36 @@ import bs4
 
 from .http import HttpClient
 from .http import make_client as _make_http_client
+from .logger import logger
 
 
-def _make_client() -> HttpClient:
-    return _make_http_client(headers={"user-agent": "@chrome"})
+class XClIdError(Exception): ...
 
 
-async def get_tw_page_text(url: str, clt: HttpClient):
+class XClIdAccountError(XClIdError):
+    """X served the logged-out web app to this account's cookies: the account's session is
+    the problem, not X's bundle. Retrying with the same cookies is futile; another account
+    may well succeed."""
+
+
+class XClIdParseError(XClIdError):
+    """The page or its scripts did not have the shape we parse. X-side, affects everyone."""
+
+
+def _make_client(proxy: str | None = None, cookies: dict[str, str] | None = None) -> HttpClient:
+    # X serves a different web build to logged-in and anonymous sessions, and only the
+    # logged-in one still carries the animation-indices script (checked live 2026-11-04:
+    # the logged-out x-web entry no longer reaches sign.o-*.js at any depth, so every
+    # anonymous derivation failed and every request was aborted). So the page is fetched
+    # with an account's cookies. They are scoped to .x.com so they are not also sent to
+    # abs.twimg.com (upstream 18f3d7c). Ported from upstream #321.
+    client = _make_http_client(headers={"user-agent": "@chrome"}, proxy=proxy)
+    for name, value in (cookies or {}).items():
+        client.cookies.set(name, value, domain=".x.com")
+    return client
+
+
+async def get_tw_page_text(url: str, clt: HttpClient) -> str:
     rep = await clt.get(url)
 
     rep.raise_for_status()
@@ -49,42 +72,52 @@ def script_url(k: str, v: str):
 # Current X web build (Vite): script bundles are linked directly in the page
 # HTML under https://abs.twimg.com/x-web/.../*.js (modulepreload links + entry).
 ASSET_URL_RE = re.compile(r"https://[\w.-]+/x-web/[\w./-]+\.js")
+# Legacy webpack build, which is what a logged-in session gets (2026-11-04).
+RESPONSIVE_WEB_URL_RE = re.compile(r"https://[\w.-]+/responsive-web/client-web/[\w./-]+\.js")
+LEGACY_MAIN_RE = re.compile(r"/client-web/main\.([^.\"']+)\.js")
+LOGGED_OUT_ENTRY_RE = re.compile(r"(?:^|/)entry-client-logged-out(?:[-.][^/?#]+)?\.js(?:[?#].*)?$")
+CHALLENGE_SCRIPT_RE = re.compile(r"/cdn-cgi/challenge-platform/(?:scripts|h)/")
+# Legacy chunk hashes: 7 hex digits before 2026-08-24, 16 since (upstream e305764). Also what
+# tells hash-map values apart from name-map values.
+_CHUNK_HASH = r"[0-9a-f]{7}|[0-9a-f]{16}"
 
 
 def get_scripts_list(text: str) -> list[str]:
     """
-    Extract chunk script URLs from the X homepage HTML.
+    Extract every known script URL format from the X homepage HTML.
 
-    Current build (x-web / Vite): scripts are linked directly in the page HTML,
-    so we just collect those URLs. If none are found we fall back to the legacy
-    webpack build, which embeds two maps in the page and requires URL
-    reconstruction:
-      - Hash map  {chunk_id: "7hexchars"}            values are exactly 7 lowercase hex digits
+    x-web/Vite and responsive-web scripts are linked directly. The legacy webpack build
+    also embeds two maps from which the remaining chunk URLs are reconstructed:
+      - Hash map  {chunk_id: "hexchars"}             values are exactly 7 or 16 lowercase hex digits
       - Name map  {chunk_id: "human_readable_name"}  values contain non-hex characters
       URL format: https://abs.twimg.com/responsive-web/client-web/{name}.{hash}a.js
+    The indices file (ondemand.s) is one of those reconstructed chunks, so the 7-only hash
+    regex this fork had silently found none of them once X moved to 16 digits.
     """
-    urls = list(dict.fromkeys(ASSET_URL_RE.findall(text)))
-    if urls:
-        return urls
+    urls = ASSET_URL_RE.findall(text) + RESPONSIVE_WEB_URL_RE.findall(text)
+    if main_match := LEGACY_MAIN_RE.search(text):
+        urls.append(script_url("main", main_match.group(1)))
 
-    # Legacy webpack build fallback.
-    # Hash map: values are exactly 7 lowercase hex digits (distinguishes them from name-map values)
-    hash_map = {m.group(1): m.group(2) for m in re.finditer(r'(\d+):"([0-9a-f]{7})"', text)}
+    # Cloudflare interstitial: the page only loads the challenge script and no app
+    # bundles, so anything parsed from it would be wrong. (A real app page can ALSO
+    # reference the challenge script -- the logged-in page does -- hence `not urls`.)
+    if not urls and CHALLENGE_SCRIPT_RE.search(text):
+        raise XClIdParseError("Cloudflare challenge page served instead of X web app")
 
-    if not hash_map:
-        raise Exception("Failed to parse scripts")
-
-    # Name map: values that are NOT exactly 7 hex digits (i.e. human-readable chunk names)
+    hash_map = {m.group(1): m.group(2) for m in re.finditer(rf'(\d+):"({_CHUNK_HASH})"', text)}
     name_map: dict[str, str] = {}
     for m in re.finditer(r'(\d+):"([^"]+)"', text):
         val = m.group(2)
-        if not re.fullmatch(r"[0-9a-f]{7}", val):
+        if not re.fullmatch(_CHUNK_HASH, val):
             name_map[m.group(1)] = val
 
-    return [
+    urls.extend(
         script_url(name_map.get(chunk_id, chunk_id), hash_val + "a")
         for chunk_id, hash_val in hash_map.items()
-    ]
+    )
+    if not urls:
+        raise XClIdParseError("X web scripts not found")
+    return list(dict.fromkeys(urls))
 
 
 # MARK: XClientTxId parsing
@@ -225,9 +258,12 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     el = soup.find("meta", {"name": "twitter-site-verification", "content": True})
     el = str(el.get("content")) if el and isinstance(el, bs4.Tag) else None
     if not el:
-        raise Exception("Couldn't get XClientTxId key bytes")
+        raise XClIdParseError("Couldn't get XClientTxId key bytes")
 
-    return list(base64.b64decode(bytes(el, "utf-8")))
+    try:
+        return list(base64.b64decode(bytes(el, "utf-8"), validate=True))
+    except ValueError as e:
+        raise XClIdParseError("Invalid XClientTxId key bytes") from e
 
 
 # File holding the animation indices: legacy build linked `ondemand.s.*.js`,
@@ -245,6 +281,10 @@ CHUNK_REF_RE = re.compile(r"""["']([\w./-]*\.js)["']""")
 # than crawling abs.twimg.com indefinitely.
 _MAX_INDICES_DEPTH = 2
 
+# Only descend from a level this small. The legacy build links ~300 chunks; following every
+# reference out of all of them would fetch thousands of files for one key.
+_MAX_DESCEND_FRONTIER = 20
+
 
 async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
     # The indices file (sign.o-*.js) is not linked in the page directly — it is
@@ -260,15 +300,19 @@ async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
     # levels, and each level still cancels its outstanding fetches on a hit.
     sem = asyncio.Semaphore(16)
 
-    async def fetch(url: str) -> tuple[str, str]:
+    async def fetch(url: str) -> tuple[str, str | None]:
         async with sem:
             try:
-                return url, (await clt.get(url)).text
-            except Exception:
-                return url, ""
+                rep = await clt.get(url)
+                rep.raise_for_status()
+                return url, rep.text
+            except Exception as e:
+                logger.trace(f"XClId asset failed: {type(e).__name__}: {e} - {url}")
+                return url, None
 
     seen: set[str] = set()
     frontier = list(dict.fromkeys(scripts))
+    loaded, failed = 0, 0
 
     for _ in range(_MAX_INDICES_DEPTH):
         frontier = [u for u in frontier if u not in seen]
@@ -281,6 +325,10 @@ async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
         try:
             for fut in asyncio.as_completed(tasks):
                 url, body = await fut
+                if body is None:
+                    failed += 1
+                    continue
+                loaded += 1
                 m = INDICES_FILE_RE.search(body)
                 if m:
                     return urljoin(url, m.group(0))
@@ -290,15 +338,25 @@ async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
             for t in tasks:
                 t.cancel()
 
+        if len(frontier) > _MAX_DESCEND_FRONTIER:
+            break
         frontier = next_frontier
 
-    raise Exception("Couldn't get XClientTxId indices script")
+    # Counts say whether X moved the file (loaded > 0) or we could not fetch at all.
+    raise XClIdParseError(
+        f"Couldn't get XClientTxId indices script (assets: {loaded} loaded, {failed} failed)"
+    )
 
 
 async def parse_anim_idx(text: str, clt: HttpClient) -> list[int]:
-    scripts = list(get_scripts_list(text))
-    if not scripts:
-        raise Exception("Couldn't get XClientTxId scripts")
+    scripts = get_scripts_list(text)
+    x_web_scripts = [url for url in scripts if "/x-web/" in url]
+    if x_web_scripts:
+        # The logged-out bundle no longer reaches the indices file, so a logged-out page
+        # means this account's cookies did not authenticate. Say so instead of crawling.
+        if any(LOGGED_OUT_ENTRY_RE.search(url) for url in x_web_scripts):
+            raise XClIdAccountError("Logged-out X web app served for this account's cookies")
+        scripts = x_web_scripts
 
     # Legacy build links the indices file directly; the current x-web build
     # hides it behind a dynamic import inside a bundle chunk.
@@ -309,7 +367,7 @@ async def parse_anim_idx(text: str, clt: HttpClient) -> list[int]:
 
     items = [int(x.group(2)) for x in INDICES_REGEX.finditer(text)]
     if not items:
-        raise Exception("Couldn't get XClientTxId indices")
+        raise XClIdParseError("Couldn't get XClientTxId indices")
 
     return items
 
@@ -319,12 +377,14 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     els = list(soup.select("svg[id^='loading-x-anim'] g:first-child path:nth-child(2)"))
     els = [str(x.get("d") or "").strip() for x in els]
     if not els:
-        raise Exception("Couldn't get XClientTxId animation array")
+        raise XClIdParseError("Couldn't get XClientTxId animation array")
 
     idx = vk_bytes[5] % len(els)
     dat = els[idx][9:].split("C")
-    arr = [list(map(float, re.sub(r"[^\d]+", " ", x).split())) for x in dat]
-    return arr
+    try:
+        return [list(map(float, re.sub(r"[^\d]+", " ", x).split())) for x in dat]
+    except (IndexError, ValueError) as e:
+        raise XClIdParseError("Invalid XClientTxId animation array") from e
 
 
 async def load_keys(soup: bs4.BeautifulSoup, clt: HttpClient) -> tuple[list[int], str]:
@@ -347,8 +407,12 @@ async def load_keys(soup: bs4.BeautifulSoup, clt: HttpClient) -> tuple[list[int]
 
 class XClIdGen:
     @staticmethod
-    async def create() -> "XClIdGen":
-        clt = _make_client()
+    async def create(
+        proxy: str | None = None, cookies: dict[str, str] | None = None
+    ) -> "XClIdGen":
+        # Pass an account's cookies: only a logged-in page still carries the indices
+        # script (see _make_client). Without them this now always fails.
+        clt = _make_client(proxy=proxy, cookies=cookies)
         try:
             text = await get_tw_page_text("https://x.com/tesla", clt)
             soup = bs4.BeautifulSoup(text, "html.parser")

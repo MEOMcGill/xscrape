@@ -16,7 +16,7 @@ from .pacer import (
     RequestStats,
 )
 from .utils import utc
-from .xclid import XClIdGen
+from .xclid import XClIdAccountError, XClIdGen
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
@@ -28,6 +28,10 @@ TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")
 TID_404_LOCK_SECONDS = 60 * 15
 # Past this many consecutive gated accounts, stop blaming the accounts and say so.
 TID_404_MAX_ACCOUNTS = 5
+
+# Same idea for XClIdAccountError: past this many accounts in a row whose cookies get the
+# logged-out page, the problem is not those accounts.
+XCLID_ACCOUNT_MAX = 5
 
 
 class HandledError(Exception): ...
@@ -53,6 +57,12 @@ class XClIdGenStore:
     # indices file), so we cache it and only re-derive when it goes stale (soft TTL)
     # or a caller reports it broken (fresh=True, driven by 404s in Ctx.req).
     # See https://github.com/vladkens/twscrape/issues/312
+    #
+    # Since 2026-11-04 it must be derived with an account's cookies (only the logged-in web
+    # app still carries the indices script; see xclid._make_client). The account that
+    # happens to trigger a derivation lends its cookies; the result is still shared. With
+    # the logged-in (legacy) build the indices file is found directly in the page's chunk
+    # map, so a derivation is ~2 requests, not the ~300-chunk scan described above.
     _gen: XClIdGen | None = None
     _created_at: float = 0.0
     _lock = asyncio.Lock()
@@ -61,7 +71,9 @@ class XClIdGenStore:
     MIN_AGE = 60  # ignore a fresh=True refresh if the key is younger than this (s)
 
     @classmethod
-    async def get(cls, username: str, fresh: bool = False) -> XClIdGen:
+    async def get(
+        cls, username: str, cookies: dict[str, str] | None = None, fresh: bool = False
+    ) -> XClIdGen:
         # `username` is kept for signature compatibility only; the key is global.
         # Fast path: a non-expired key exists and the caller isn't forcing a refresh.
         if cls._gen is not None and not fresh and time.monotonic() - cls._created_at < cls.TTL:
@@ -83,9 +95,16 @@ class XClIdGenStore:
             tries = 0
             while tries < 3:
                 try:
-                    cls._gen = await XClIdGen.create()
+                    cls._gen = await XClIdGen.create(cookies=cookies)
                     cls._created_at = time.monotonic()
                     return cls._gen
+                except XClIdAccountError:
+                    # This account's session is the problem; the same cookies will fail
+                    # again. Keep a cached key if there is one, else let the caller park
+                    # the account so the next one derives with its own cookies.
+                    if cls._gen is not None:
+                        return cls._gen
+                    raise
                 except Exception as e:
                     tries += 1
                     logger.warning(
@@ -100,6 +119,9 @@ class XClIdGenStore:
                 logger.warning("XClIdGen refresh failed; falling back to cached key")
                 return cls._gen
 
+            # ERROR, not WARNING: from here every request is aborted and the caller sees an
+            # empty result, which on 2026-11-04 let a whole nightly run "succeed" with 0 tweets.
+            logger.error("XClIdGen creation failed 3 times; aborting the request")
             raise AbortReqError(
                 "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
             )
@@ -121,7 +143,9 @@ class Ctx:
 
         tries = 0
         while tries < 3:
-            gen = await XClIdGenStore.get(self.acc.username, fresh=tries > 0)
+            gen = await XClIdGenStore.get(
+                self.acc.username, cookies=self.acc.cookies, fresh=tries > 0
+            )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
             rep = await self.clt.request(method, url, params=params, headers=hdr)
             if rep.status_code != 404:
@@ -353,7 +377,7 @@ class QueueClient:
         return await self.req("GET", url, params=params)
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
-        unknown_retry, connection_retry, cf_retry, tid_404 = 0, 0, 0, 0
+        unknown_retry, connection_retry, cf_retry, tid_404, xclid_acc = 0, 0, 0, 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -400,6 +424,18 @@ class QueueClient:
                         "the operation id is probably stale, not the accounts"
                     ) from None
                 await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
+                continue
+            except XClIdAccountError as e:
+                # X served this account the logged-out app: its session did not authenticate
+                # the page fetch. Park it on this queue (not deactivate -- relogin is
+                # destructive on this pool) and let the next account derive the key.
+                xclid_acc += 1
+                if xclid_acc > XCLID_ACCOUNT_MAX:
+                    raise XClIdAccountError(
+                        f"{self.queue}: logged-out web app for {xclid_acc} accounts in a row"
+                    ) from None
+                logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
+                await self._close_ctx(utc.ts() + 60 * 15)
                 continue
             except AbortReqError:
                 # abort all queries
