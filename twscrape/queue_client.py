@@ -15,7 +15,7 @@ from .pacer import (
     RequestPacer,
     RequestStats,
 )
-from .utils import utc
+from .utils import find_obj, utc
 from .xclid import XClIdAccountError, XClIdGen
 
 ReqParams = dict[str, str | int] | None
@@ -42,6 +42,28 @@ class AbortReqError(Exception): ...
 
 class TxIdRejectedError(Exception):
     """This account got a 404 from this endpoint even after fresh transaction ids."""
+
+
+class TimelineFailedError(Exception):
+    """This account got a 200 whose timeline X failed to build: an Internal server error
+    on the timeline path and no timeline in the data."""
+
+
+def _timeline_failed(res: Any) -> bool:
+    if not isinstance(res, dict) or not isinstance(res.get("errors"), list):
+        return False
+    failed = any(
+        isinstance(e, dict)
+        and "Internal server error" in str(e.get("message", ""))
+        and (e.get("path") or [])[-1:] == ["timeline"]
+        for e in res["errors"]
+    )
+    # A timeline that did arrive (instructions present) is kept, whatever the error list says.
+    data = res.get("data")
+    has_timeline = (
+        find_obj(data, lambda x: "instructions" in x) if isinstance(data, dict) else None
+    )
+    return failed and has_timeline is None
 
 
 class CloudflareBlockSignal(Exception):
@@ -353,6 +375,19 @@ class QueueClient:
                 logger.warning(f"Dependency error (request skipped): {err_msg}")
                 raise AbortReqError()
 
+        # A search-gated account does not always answer with the empty 404. About as often it
+        # answers 200 with
+        #   {"data":{"search_by_raw_query":{"search_timeline":{}}},
+        #    "errors":[{"message":"Internal server error","path":[..., "timeline"]}]}
+        # which has no entries and no cursor. Passed through, _gql_items took it for the end
+        # of the results, so the query came back empty or cut short with only a WARNING to
+        # show for it. Measured 2026-11-07 on a 142k-day search run: 12,188 of 12,195 such
+        # responses came from the 43 accounts that were also getting the gated 404, and a
+        # day one of them answered this way returned 43 tweets on a non-gated account. So
+        # it gets the gated-404 treatment: park this account on this queue, retry elsewhere.
+        if rep.status_code == 200 and _timeline_failed(res):
+            raise TimelineFailedError(log_msg)
+
         # content not found
         if rep.status_code == 200 and "_Missing: No status found with that ID" in err_msg:
             return  # ignore this error
@@ -378,6 +413,7 @@ class QueueClient:
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
         unknown_retry, connection_retry, cf_retry, tid_404, xclid_acc = 0, 0, 0, 0, 0
+        timeline_failed = 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
@@ -410,6 +446,19 @@ class QueueClient:
                         f"Cloudflare still blocking after {cf_retry} attempts"
                     ) from None
                 continue  # wait_if_blocked at loop top serves the backoff
+            except TimelineFailedError as e:
+                # The other face of per-account gating (see _check_rep). Its own counter and
+                # message: if every account answers this way, X is failing the query itself,
+                # and that has to surface as an error -- not as an empty result.
+                timeline_failed += 1
+                if timeline_failed > TID_404_MAX_ACCOUNTS:
+                    raise EndpointRejectedError(
+                        f"{self.queue}: no timeline (Internal server error) from "
+                        f"{timeline_failed} accounts in a row -- X is failing this query"
+                    ) from None
+                logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
+                await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
+                continue
             except TxIdRejectedError:
                 # An empty-bodied 404 with healthy rate-limit headers means X denies this
                 # account this endpoint; retrying it is futile, so park it (per-queue, so it
