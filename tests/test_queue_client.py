@@ -186,3 +186,69 @@ async def test_logged_out_xclid_parks_account_and_uses_next(
     assert asked == ["user1", "user2"]
     assert "user1" in await get_locked(pool)  # parked, not deactivated
     assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+# What a search-gated account sent for a day that has 43 tweets (captured live 2026-11-07).
+TIMELINE_ISE = {
+    "data": {"search_by_raw_query": {"search_timeline": {}}},
+    "errors": [
+        {
+            "locations": [{"column": 7, "line": 4}],
+            "message": "Internal server error",
+            "path": ["search_by_raw_query", "search_timeline", "timeline"],
+        }
+    ],
+}
+
+
+async def test_timeline_internal_error_parks_account_and_uses_next(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """A 200 with no timeline and an Internal server error on it is the gated account's
+    other answer. Passed through, it ended the search as an empty result."""
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=TIMELINE_ISE, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}  # parked on this queue
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_timeline_internal_error_with_a_timeline_passes_through(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """If the timeline did arrive, keep it: the error list alone is not a failure."""
+    pool, client = client_fixture
+    body = {
+        "data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": []}}}},
+        "errors": TIMELINE_ISE["errors"],
+    }
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == body
+
+
+async def test_timeline_internal_error_from_every_account_fails_loudly(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """If every account gets it, X is failing the query: raise, never return empty."""
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 1)
+    httpx_mock.add_response(url=URL, json=TIMELINE_ISE, status_code=200)
+    httpx_mock.add_response(url=URL, json=TIMELINE_ISE, status_code=200)
+
+    with pytest.raises(EndpointRejectedError, match="Internal server error"):
+        async with client:
+            await client.get(URL)
