@@ -23,6 +23,15 @@ class EndpointRejectedError(Exception):
     404 body is empty and the rate-limit headers look healthy."""
 
 
+class RequestAbortedError(Exception):
+    """A request was given up for a reason that says nothing about the data: the
+    transaction-id generator could not be built, X answered with an HTML error page, or
+    X reported a "(131) Dependency" error with no data. These used to end the query
+    quietly, so callers saw "no results". On 2026-11-04 every request failed to build
+    its transaction id, and a nightly run saved 2,881 empty units as collected. Raised
+    instead, so the caller can tell "X never answered" apart from "X found nothing"."""
+
+
 class RequestPacer:
     # X fronts its GraphQL endpoints with a Cloudflare per-IP rate rule (observed
     # 2026-08: ~900 requests / 10 min from one IP trips a 429 wall that blocks every

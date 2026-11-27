@@ -57,8 +57,13 @@ async def test_cf_block_recovers_and_resets_streak(httpx_mock: HTTPXMock, client
     await client.__aexit__(None, None, None)
 
 
-async def test_non_cf_html_block_keeps_abort_behavior(httpx_mock: HTTPXMock, client_fixture):
-    # an HTML 4xx without cf-ray is not a Cloudflare wall: old silent-abort path
+async def test_non_cf_html_block_aborts_loudly(httpx_mock: HTTPXMock, client_fixture):
+    # an HTML 4xx without cf-ray is not a Cloudflare wall: no backoff, the request is
+    # aborted -- and raises, where it used to return None, i.e. an empty result
+    import pytest
+
+    from twscrape.pacer import RequestAbortedError
+
     _, client = client_fixture
     await client.__aenter__()
 
@@ -66,7 +71,8 @@ async def test_non_cf_html_block_keeps_abort_behavior(httpx_mock: HTTPXMock, cli
         url=URL, status_code=403, html="<html>nope</html>", headers={"content-type": "text/html"}
     )
 
-    assert await client.get(URL) is None
+    with pytest.raises(RequestAbortedError, match="HTML error page"):
+        await client.get(URL)
     assert RequestStats.cf_blocks == 0
     await client.__aexit__(None, None, None)
 

@@ -22,7 +22,9 @@ class Account(JSONTrait):
     email_password: str
     user_agent: str
     active: bool
-    locks: dict[str, datetime] = field(default_factory=dict)  # queue: datetime
+    # queue: datetime (locked until then), or -1 (SUSPENDED_ON_QUEUE: X refuses this account
+    # that endpoint; never expires -- see accounts_pool.suspend)
+    locks: dict[str, datetime | int] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=dict)  # queue: requests
     headers: dict[str, str] = field(default_factory=dict)
     cookies: dict[str, str] = field(default_factory=dict)
@@ -42,7 +44,9 @@ class Account(JSONTrait):
         # in_use, use_case, last_login, automated from a custom twscrape migration).
         known = {f.name for f in dataclasses.fields(Account)}
         doc = {k: v for k, v in doc.items() if k in known}
-        doc["locks"] = {k: utc.from_iso(v) for k, v in json.loads(doc["locks"]).items()}
+        doc["locks"] = {
+            k: v if v == -1 else utc.from_iso(v) for k, v in json.loads(doc["locks"]).items()
+        }
         doc["stats"] = {k: v for k, v in json.loads(doc["stats"]).items() if isinstance(v, int)}
         doc["headers"] = json.loads(doc["headers"])
         doc["cookies"] = json.loads(doc["cookies"])

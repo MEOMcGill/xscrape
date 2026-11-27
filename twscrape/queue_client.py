@@ -5,13 +5,14 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from .accounts_pool import Account, AccountsPool
+from .accounts_pool import Account, AccountsPool, NoAccountError
 from .http import ConnectError, HttpClient, HttpMethod, HttpStatusError, NetworkError, Response
 from .logger import logger
 from .pacer import (
     CloudflareBackoff,
     CloudflareBlockedError,
     EndpointRejectedError,
+    RequestAbortedError,
     RequestPacer,
     RequestStats,
 )
@@ -22,22 +23,35 @@ ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
 
-# A gated account is parked this long before search retries it. Short enough to recover on
-# its own if X lifts the restriction, long enough not to re-burn a request (and three
-# transaction-id attempts) on a permanently gated account every few seconds.
+# A gated "Internal server error" (and any other error with no content) parks the account
+# on that queue this long. The empty 404 and ProductDisabled suspend it there instead.
 TID_404_LOCK_SECONDS = 60 * 15
-# Past this many consecutive gated accounts, stop blaming the accounts and say so.
+# At this many consecutive refused accounts, the query fails (EndpointRejectedError).
 TID_404_MAX_ACCOUNTS = 5
 
 # Same idea for XClIdAccountError: past this many accounts in a row whose cookies get the
 # logged-out page, the problem is not those accounts.
 XCLID_ACCOUNT_MAX = 5
 
+# An account X refuses an endpoint -- empty 404, or 200 "ProductDisabled: Closed gate" -- is
+# suspended on that endpoint (queue) for good (AccountsPool.suspend, lock value -1), never
+# deactivated: its other endpoints still work. Measured 2026-11-27: 79 of 86 pool accounts
+# suspended by X since 11-21, every one still serving timelines, and answering search with
+# one of those two. Short parks sent them back to be refused all week (8,656 ProductDisabled
+# refusals in one crawl, 11-24/25). Once every account is suspended on an endpoint, the
+# pool's "no active accounts" check stops the query instead of waiting.
+
 
 class HandledError(Exception): ...
 
 
-class AbortReqError(Exception): ...
+class AbortReqError(Exception):
+    """Internal: give up on this request. req() re-raises it as RequestAbortedError."""
+
+
+class AccountRefusedError(Exception):
+    """X refused this account this endpoint ("ProductDisabled: Closed gate"). The
+    account may still work elsewhere, so it is parked on this queue only."""
 
 
 class TxIdRejectedError(Exception):
@@ -47,6 +61,46 @@ class TxIdRejectedError(Exception):
 class TimelineFailedError(Exception):
     """This account got a 200 whose timeline X failed to build: an Internal server error
     on the timeline path and no timeline in the data."""
+
+
+class NoContentError(TimelineFailedError):
+    """X reported an error and sent nothing usable back, whatever the error said. Retried on
+    the next account without pausing this one (nothing says the account is at fault); the
+    query fails after TID_404_MAX_ACCOUNTS in a row, like TimelineFailedError."""
+
+
+def _is_empty(obj: Any) -> bool:
+    """None, or containers holding nothing but other empty containers. Any scalar counts
+    as content (a __typename, an id, a cursor value)."""
+    if obj is None:
+        return True
+    if isinstance(obj, dict):
+        return all(_is_empty(v) for v in obj.values())
+    if isinstance(obj, list):
+        return all(_is_empty(v) for v in obj)
+    return False
+
+
+def _failed_without_content(res: Any) -> bool:
+    """An error came back, and the content the request was for did not.
+
+    Two shapes: `data` holds nothing at all (`{"search_timeline": {}}` and the like), or
+    an error sits on a `timeline` path and no timeline arrived -- a user-timeline response
+    still carries the user object around the missing timeline, so `data` is not empty.
+    Deliberately blind to the error's wording: every message that slipped through so far
+    was one nobody had seen before."""
+    if not isinstance(res, dict) or not isinstance(res.get("errors"), list) or not res["errors"]:
+        return False
+    data = res.get("data")
+    # A timeline that arrived is X's answer, even an empty one (`"instructions": []` is a
+    # search with no results): keep it, whatever the error list says.
+    if isinstance(data, dict) and find_obj(data, lambda x: "instructions" in x) is not None:
+        return False
+    if _is_empty(data):
+        return True
+    return any(
+        isinstance(e, dict) and (e.get("path") or [])[-1:] == ["timeline"] for e in res["errors"]
+    )
 
 
 def _timeline_failed(res: Any) -> bool:
@@ -141,8 +195,9 @@ class XClIdGenStore:
                 logger.warning("XClIdGen refresh failed; falling back to cached key")
                 return cls._gen
 
-            # ERROR, not WARNING: from here every request is aborted and the caller sees an
-            # empty result, which on 2026-11-04 let a whole nightly run "succeed" with 0 tweets.
+            # From here every request is aborted. It used to reach the caller as an empty
+            # result, which on 2026-11-04 let a whole nightly run "succeed" with 0 tweets;
+            # req() now raises it as RequestAbortedError.
             logger.error("XClIdGen creation failed 3 times; aborting the request")
             raise AbortReqError(
                 "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
@@ -245,7 +300,9 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self, reset_at=-1, inactive=False, msg: str | None = None, suspend: bool = False
+    ):
         if self.ctx is None:
             return
 
@@ -255,6 +312,10 @@ class QueueClient:
 
         if inactive:
             await self.pool.mark_inactive(username, msg)
+            return
+
+        if suspend:  # off this queue for good; see AccountsPool.suspend
+            await self.pool.suspend(username, self.queue, ctx.req_count)
             return
 
         if reset_at > 0:
@@ -307,7 +368,9 @@ class QueueClient:
             logger.warning(f"Blocked by {src}: {rep.status_code} - {req_id(rep)}")
             if src == "Cloudflare":
                 raise CloudflareBlockSignal()
-            raise AbortReqError()
+            raise AbortReqError(
+                f"blocked by an HTML error page: {rep.status_code} - {req_id(rep)}"
+            )
 
         try:
             res = rep.json()
@@ -373,7 +436,7 @@ class QueueClient:
                 err_msg = "OK"
             else:
                 logger.warning(f"Dependency error (request skipped): {err_msg}")
-                raise AbortReqError()
+                raise AbortReqError(f"dependency error with no data: {log_msg}")
 
         # A search-gated account does not always answer with the empty 404. About as often it
         # answers 200 with
@@ -388,18 +451,39 @@ class QueueClient:
         if rep.status_code == 200 and _timeline_failed(res):
             raise TimelineFailedError(log_msg)
 
-        # content not found
+        # "(-1) InvalidArgument: ProductDisabled: Closed gate stopped execution of the
+        # pipeline (LatestTabSrp...)": X refuses this account Latest search. It fell
+        # through to "API unknown error" below and was passed on as an empty page, so the
+        # query ended with no results. In the 2026-11-24/25 qc_election snap crawl, 62
+        # accounts were refused 8,656 times, and 11,711 of 13,521 keyword units saved 0
+        # tweets (meo-airflow#346). Park the account on this queue and retry the query on
+        # the next one.
+        if "ProductDisabled" in err_msg:
+            raise AccountRefusedError(log_msg)
+
+        # content not found: a genuine answer (deleted / never-existing tweet), not a failure.
+        # The allowlist for the rule below -- add other known "not found" answers here.
         if rep.status_code == 200 and "_Missing: No status found with that ID" in err_msg:
             return  # ignore this error
 
-        # something from twitter side - just ignore it, see: https://github.com/vladkens/twscrape/pull/95
+        # Any other error that came back without the content asked for is a failure. The
+        # checks above each name one message, and each was added only after an unknown
+        # message had passed as an empty result and lost data: the gated "Internal server
+        # error" (2026-11-07), "ProductDisabled" (2026-11-24). This one does not need to
+        # know the message. GraphQL answers 200 with partial errors routinely, so an error
+        # alone is not enough -- an error *and* nothing usable is.
+        if err_msg != "OK" and _failed_without_content(res):
+            raise NoContentError(log_msg)
+
+        # Errors that arrived with content are partial errors (a protected quoted tweet, an
+        # optional field): keep the content. See https://github.com/vladkens/twscrape/pull/95
         if rep.status_code == 200 and "Authorization" in err_msg:
             logger.warning(f"Authorization unknown error: {log_msg}")
             return
 
         if err_msg != "OK":
-            logger.warning(f"API unknown error: {log_msg}")
-            return  # ignore any other unknown errors
+            logger.warning(f"API unknown error (content kept): {log_msg}")
+            return
 
         try:
             rep.raise_for_status()
@@ -413,12 +497,14 @@ class QueueClient:
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
         unknown_retry, connection_retry, cf_retry, tid_404, xclid_acc = 0, 0, 0, 0, 0
-        timeline_failed = 0
+        timeline_failed, refused = 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
             if ctx is None:
-                return None
+                # The pool has no active account at all (get_for_queue_or_wait already
+                # waits out locks). Returning None here ended the query as "no results".
+                raise NoAccountError(f"No active accounts for queue {self.queue}")
 
             try:
                 # Cloudflare blocks are per-IP, so all requests share one backoff
@@ -447,15 +533,27 @@ class QueueClient:
                     ) from None
                 continue  # wait_if_blocked at loop top serves the backoff
             except TimelineFailedError as e:
-                # The other face of per-account gating (see _check_rep). Its own counter and
+                # The other face of per-account gating (see _check_rep), and any other error
+                # that came back without content (NoContentError). Its own counter and
                 # message: if every account answers this way, X is failing the query itself,
                 # and that has to surface as an error -- not as an empty result.
                 timeline_failed += 1
-                if timeline_failed > TID_404_MAX_ACCOUNTS:
+                if timeline_failed >= TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
-                        f"{self.queue}: no timeline (Internal server error) from "
-                        f"{timeline_failed} accounts in a row -- X is failing this query"
+                        f"{self.queue}: an error and no content from {timeline_failed} accounts "
+                        f"in a row -- X is failing this query. Last: {e}"
                     ) from None
+                if isinstance(e, NoContentError):
+                    # No blame: an unrecognised message does not say the account is at fault,
+                    # so it is not paused. Rotate to the next account exactly as after an
+                    # ordinary request (its short pick lock stays, so the pool does not hand
+                    # it straight back) and retry. WARNING, not INFO: a message no check
+                    # names yet, worth reading.
+                    logger.warning(
+                        f"Error with no content, retrying on another account ({self.queue}): {e}"
+                    )
+                    await self._rotate_ctx()
+                    continue
                 logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
                 await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
                 continue
@@ -466,13 +564,20 @@ class QueueClient:
                 # query aborted on the first gated account -- and since the pool hands out
                 # accounts least-recently-used first, one gated account at the head of the
                 # queue silently zeroed every search.
+                #
+                # Suspended on this endpoint right away (see SUSPENDED_ON_QUEUE above). An empty
+                # 404 from many accounts can also mean the operation id went stale (a few
+                # times a year); that is checked by hand, and whoever updates the op id clears
+                # the suspensions (`twscrape reset_locks`).
                 tid_404 += 1
-                if tid_404 > TID_404_MAX_ACCOUNTS:
+                logger.warning(f"Empty 404, suspended on {self.queue}: {ctx.acc.username}")
+                await self._close_ctx(suspend=True)
+                if tid_404 >= TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
-                        f"{self.queue}: empty 404 from {tid_404} accounts in a row -- "
-                        "the operation id is probably stale, not the accounts"
+                        f"{self.queue}: empty 404 from {tid_404} accounts in a row, each "
+                        "suspended on it -- the accounts are gated or suspended by X, or the "
+                        "operation id is stale (check the request format if this keeps happening)"
                     ) from None
-                await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
                 continue
             except XClIdAccountError as e:
                 # X served this account the logged-out app: its session did not authenticate
@@ -486,9 +591,23 @@ class QueueClient:
                 logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
                 await self._close_ctx(utc.ts() + 60 * 15)
                 continue
-            except AbortReqError:
-                # abort all queries
-                return
+            except AccountRefusedError as e:
+                # X names the refusal ("ProductDisabled"): suspend the account on this queue
+                # right away, take the next account, and at a run of refusals say that X is
+                # refusing this endpoint to the pool.
+                refused += 1
+                logger.warning(f"Account refused, suspended on {self.queue}: {e}")
+                await self._close_ctx(suspend=True)
+                if refused >= TID_404_MAX_ACCOUNTS:
+                    raise EndpointRejectedError(
+                        f"{self.queue}: ProductDisabled (closed gate) from {refused} accounts "
+                        "in a row -- X is refusing this endpoint to the pool"
+                    ) from None
+                continue
+            except AbortReqError as e:
+                # Raise, never return: a bare return here reached the caller as an empty
+                # result, indistinguishable from "X found nothing" (see RequestAbortedError).
+                raise RequestAbortedError(f"{self.queue}: {e}") from None
             except HandledError:
                 # retry with new account
                 continue

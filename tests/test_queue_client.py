@@ -245,10 +245,314 @@ async def test_timeline_internal_error_from_every_account_fails_loudly(
     from twscrape.pacer import EndpointRejectedError
 
     pool, client = client_fixture
-    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 1)
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 2)
     httpx_mock.add_response(url=URL, json=TIMELINE_ISE, status_code=200)
     httpx_mock.add_response(url=URL, json=TIMELINE_ISE, status_code=200)
 
     with pytest.raises(EndpointRejectedError, match="Internal server error"):
         async with client:
             await client.get(URL)
+
+
+# -- a request X never answered must raise, never come back as an empty result -----------
+
+
+async def test_xclid_failure_raises_instead_of_returning_empty(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """2026-11-04: the transaction-id generator could not be built, every request was
+    aborted, and each query came back as "no results". It must raise."""
+    import pytest
+
+    from twscrape.pacer import RequestAbortedError
+    from twscrape.queue_client import AbortReqError, XClIdGenStore
+
+    pool, client = client_fixture
+
+    async def broken_get(cls, username, cookies=None, fresh=False):
+        raise AbortReqError("Failed to create XClIdGen")
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(broken_get))
+
+    with pytest.raises(RequestAbortedError, match="XClIdGen"):
+        async with client:
+            await client.get(URL)
+
+
+# What a search-refused account sent (meo-airflow#346, 2026-11-24).
+PRODUCT_DISABLED = {
+    "errors": [
+        {
+            "code": -1,
+            "message": "InvalidArgument: ProductDisabled: Closed gate stopped execution of the "
+            "pipeline (LatestTabSrpProduct)",
+        }
+    ]
+}
+
+
+async def test_product_disabled_parks_account_and_uses_next(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """It fell through to "API unknown error" and ended the search as an empty page."""
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}  # parked on this queue, not deactivated
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_product_disabled_from_every_account_fails_loudly(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 2)
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+
+    with pytest.raises(EndpointRejectedError, match="ProductDisabled"):
+        async with client:
+            await client.get(URL)
+
+
+async def test_no_active_account_raises(client_fixture: CF):
+    """With no active account the request returned None, i.e. an empty result."""
+    import pytest
+
+    from twscrape.accounts_pool import NoAccountError
+
+    pool, client = client_fixture
+    for name in ("user1", "user2"):
+        await pool.set_active(name, False)
+
+    with pytest.raises(NoAccountError):
+        async with client:
+            await client.get(URL)
+
+
+# -- any error that comes back without content is a failure, whatever it says -------------
+
+# A made-up message: the rule must not depend on the wording.
+UNKNOWN_EMPTY = {
+    "data": {"search_by_raw_query": {"search_timeline": {}}},
+    "errors": [{"code": 999, "message": "SomethingNew: nobody has seen this one"}],
+}
+
+
+async def test_unknown_error_without_content_retries_on_another_account_without_pausing(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """No blame: the account is not paused, only rotated away from like after any request."""
+    import datetime as _dt
+
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert getattr(rep, "__username") == "user2"  # retried on another account
+    lock = next(a for a in await pool.get_all() if a.username == "user1").locks["SearchTimeline"]
+    # only the ordinary pick lock (seconds), not the 15-minute park
+    assert lock < _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=5)
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_unknown_error_without_content_from_every_account_fails_loudly(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 2)
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+
+    with pytest.raises(EndpointRejectedError, match="SomethingNew"):
+        async with client:
+            await client.get(URL)
+
+
+async def test_error_on_timeline_path_with_user_around_it_is_a_failure(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """A user timeline keeps the user object around the missing timeline, so `data` is not
+    empty -- the error's path is what says the timeline failed."""
+    pool, client = client_fixture
+    body = {
+        "data": {"user": {"result": {"__typename": "User", "timeline": {}}}},
+        "errors": [{"message": "Timeout: Unspecified", "path": ["user", "result", "timeline"]}],
+    }
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}
+
+
+async def test_error_with_content_is_kept(httpx_mock: HTTPXMock, client_fixture: CF):
+    """A partial error (here: a protected quoted tweet) with the main content present is
+    not a failure: keep the response."""
+    pool, client = client_fixture
+    body = {
+        "data": {"tweetResult": {"result": {"__typename": "Tweet", "rest_id": "1"}}},
+        "errors": [{"message": "Authorization: Denied by access control", "path": ["quoted"]}],
+    }
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == body
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_empty_timeline_with_an_error_is_an_answer():
+    """`"instructions": []` is X saying "no results": content, not a failure."""
+    from twscrape.queue_client import _failed_without_content
+
+    empty_search = {
+        "data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": []}}}},
+        "errors": [{"message": "SomethingNew", "path": ["x"]}],
+    }
+    assert not _failed_without_content(empty_search)
+    assert _failed_without_content(UNKNOWN_EMPTY)
+    assert not _failed_without_content({"data": {}})  # no error: a plain empty answer
+
+
+async def test_missing_status_is_a_genuine_not_found(httpx_mock: HTTPXMock, client_fixture: CF):
+    """The allowlist: a deleted tweet answers with an error and no data, and that is the
+    true answer, so no account is parked and no retry happens."""
+    pool, client = client_fixture
+    body = {"data": {}, "errors": [{"message": "_Missing: No status found with that ID"}]}
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == body
+
+
+# -- refused accounts are suspended on that endpoint (-1), never deactivated --------------
+
+
+async def _lock_on(pool: AccountsPool, name: str, queue: str = "SearchTimeline"):
+    return next(a for a in await pool.get_all() if a.username == name).locks.get(queue)
+
+
+async def test_empty_404_suspends_the_account_on_that_endpoint(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+    for _ in range(3):  # Ctx.req retries a 404 three times with fresh transaction ids
+        httpx_mock.add_response(url=URL, status_code=404)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == {"foo": "bar"}
+    assert await _lock_on(pool, "user1") == -1  # suspended on search, still active
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_empty_404_from_every_account_suspends_each_and_fails(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """Every 404 suspends its account, even in a run of them (a stale operation id is
+    checked by hand); the query fails loudly rather than coming back empty."""
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 2)  # fails on the 2nd in a row
+    for _ in range(6):  # 2 accounts x 3 tries each
+        httpx_mock.add_response(url=URL, status_code=404)
+
+    with pytest.raises(EndpointRejectedError, match="empty 404 from 2 accounts"):
+        async with client:
+            await client.get(URL)
+
+    for name in ("user1", "user2"):
+        assert await _lock_on(pool, name) == -1
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_product_disabled_suspends_the_account_on_that_endpoint(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        await client.get(URL)
+
+    assert await _lock_on(pool, "user1") == -1
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_suspended_account_is_skipped_on_that_endpoint_only(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+    await pool.suspend("user1", "SearchTimeline")
+
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+    async with client:
+        rep = await client.get(URL)
+    assert getattr(rep, "__username") == "user2"  # never handed user1 for search
+
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+    async with QueueClient(pool, "UserTweetsAndReplies") as other:
+        rep = await other.get(URL)
+    assert getattr(rep, "__username") == "user1"  # still serves its other endpoints
+
+
+async def test_every_account_suspended_on_an_endpoint_fails_instead_of_waiting(
+    client_fixture: CF,
+):
+    """The pool's "no active accounts" check counts endpoint-suspended accounts as gone, so
+    the query fails at once instead of waiting for a lock that never expires."""
+    import time
+
+    import pytest
+
+    from twscrape.accounts_pool import NoAccountError
+
+    pool, client = client_fixture
+    for name in ("user1", "user2"):
+        await pool.suspend(name, "SearchTimeline")
+
+    started = time.monotonic()
+    with pytest.raises(NoAccountError):
+        async with client:
+            await client.get(URL)
+    assert time.monotonic() - started < 5
+
+
+async def test_reset_locks_clears_suspensions(client_fixture: CF):
+    pool, _ = client_fixture
+    await pool.suspend("user1", "SearchTimeline")
+    await pool.reset_locks()
+    assert await _lock_on(pool, "user1") is None
