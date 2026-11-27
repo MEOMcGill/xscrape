@@ -64,8 +64,9 @@ class TimelineFailedError(Exception):
 
 
 class NoContentError(TimelineFailedError):
-    """X reported an error and sent nothing usable back, whatever the error said. Handled
-    like TimelineFailedError: park the account on this queue, retry on the next one."""
+    """X reported an error and sent nothing usable back, whatever the error said. Retried on
+    the next account without pausing this one (nothing says the account is at fault); the
+    query fails after TID_404_MAX_ACCOUNTS in a row, like TimelineFailedError."""
 
 
 def _is_empty(obj: Any) -> bool:
@@ -543,10 +544,17 @@ class QueueClient:
                         f"in a row -- X is failing this query. Last: {e}"
                     ) from None
                 if isinstance(e, NoContentError):
-                    # WARNING, not INFO: a message no check names yet. Worth reading.
-                    logger.warning(f"Error with no content, parking on {self.queue}: {e}")
-                else:
-                    logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
+                    # No blame: an unrecognised message does not say the account is at fault,
+                    # so it is not paused. Rotate to the next account exactly as after an
+                    # ordinary request (its short pick lock stays, so the pool does not hand
+                    # it straight back) and retry. WARNING, not INFO: a message no check
+                    # names yet, worth reading.
+                    logger.warning(
+                        f"Error with no content, retrying on another account ({self.queue}): {e}"
+                    )
+                    await self._rotate_ctx()
+                    continue
+                logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
                 await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
                 continue
             except TxIdRejectedError:

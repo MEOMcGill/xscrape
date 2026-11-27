@@ -349,9 +349,12 @@ UNKNOWN_EMPTY = {
 }
 
 
-async def test_unknown_error_without_content_parks_account_and_uses_next(
+async def test_unknown_error_without_content_retries_on_another_account_without_pausing(
     httpx_mock: HTTPXMock, client_fixture: CF
 ):
+    """No blame: the account is not paused, only rotated away from like after any request."""
+    import datetime as _dt
+
     pool, client = client_fixture
     httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
     httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
@@ -360,7 +363,10 @@ async def test_unknown_error_without_content_parks_account_and_uses_next(
         rep = await client.get(URL)
 
     assert rep is not None and rep.json() == {"foo": "bar"}
-    assert await get_locked(pool) == {"user1"}  # parked on this queue, not deactivated
+    assert getattr(rep, "__username") == "user2"  # retried on another account
+    lock = next(a for a in await pool.get_all() if a.username == "user1").locks["SearchTimeline"]
+    # only the ordinary pick lock (seconds), not the 15-minute park
+    assert lock < _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=5)
     assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
 
 
