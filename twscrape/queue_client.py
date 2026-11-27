@@ -64,6 +64,45 @@ class TimelineFailedError(Exception):
     on the timeline path and no timeline in the data."""
 
 
+class NoContentError(TimelineFailedError):
+    """X reported an error and sent nothing usable back, whatever the error said. Handled
+    like TimelineFailedError: park the account on this queue, retry on the next one."""
+
+
+def _is_empty(obj: Any) -> bool:
+    """None, or containers holding nothing but other empty containers. Any scalar counts
+    as content (a __typename, an id, a cursor value)."""
+    if obj is None:
+        return True
+    if isinstance(obj, dict):
+        return all(_is_empty(v) for v in obj.values())
+    if isinstance(obj, list):
+        return all(_is_empty(v) for v in obj)
+    return False
+
+
+def _failed_without_content(res: Any) -> bool:
+    """An error came back, and the content the request was for did not.
+
+    Two shapes: `data` holds nothing at all (`{"search_timeline": {}}` and the like), or
+    an error sits on a `timeline` path and no timeline arrived -- a user-timeline response
+    still carries the user object around the missing timeline, so `data` is not empty.
+    Deliberately blind to the error's wording: every message that slipped through so far
+    was one nobody had seen before."""
+    if not isinstance(res, dict) or not isinstance(res.get("errors"), list) or not res["errors"]:
+        return False
+    data = res.get("data")
+    # A timeline that arrived is X's answer, even an empty one (`"instructions": []` is a
+    # search with no results): keep it, whatever the error list says.
+    if isinstance(data, dict) and find_obj(data, lambda x: "instructions" in x) is not None:
+        return False
+    if _is_empty(data):
+        return True
+    return any(
+        isinstance(e, dict) and (e.get("path") or [])[-1:] == ["timeline"] for e in res["errors"]
+    )
+
+
 def _timeline_failed(res: Any) -> bool:
     if not isinstance(res, dict) or not isinstance(res.get("errors"), list):
         return False
@@ -416,18 +455,29 @@ class QueueClient:
         if "ProductDisabled" in err_msg:
             raise AccountRefusedError(log_msg)
 
-        # content not found
+        # content not found: a genuine answer (deleted / never-existing tweet), not a failure.
+        # The allowlist for the rule below -- add other known "not found" answers here.
         if rep.status_code == 200 and "_Missing: No status found with that ID" in err_msg:
             return  # ignore this error
 
-        # something from twitter side - just ignore it, see: https://github.com/vladkens/twscrape/pull/95
+        # Any other error that came back without the content asked for is a failure. The
+        # checks above each name one message, and each was added only after an unknown
+        # message had passed as an empty result and lost data: the gated "Internal server
+        # error" (2026-11-07), "ProductDisabled" (2026-11-24). This one does not need to
+        # know the message. GraphQL answers 200 with partial errors routinely, so an error
+        # alone is not enough -- an error *and* nothing usable is.
+        if err_msg != "OK" and _failed_without_content(res):
+            raise NoContentError(log_msg)
+
+        # Errors that arrived with content are partial errors (a protected quoted tweet, an
+        # optional field): keep the content. See https://github.com/vladkens/twscrape/pull/95
         if rep.status_code == 200 and "Authorization" in err_msg:
             logger.warning(f"Authorization unknown error: {log_msg}")
             return
 
         if err_msg != "OK":
-            logger.warning(f"API unknown error: {log_msg}")
-            return  # ignore any other unknown errors
+            logger.warning(f"API unknown error (content kept): {log_msg}")
+            return
 
         try:
             rep.raise_for_status()
@@ -477,16 +527,21 @@ class QueueClient:
                     ) from None
                 continue  # wait_if_blocked at loop top serves the backoff
             except TimelineFailedError as e:
-                # The other face of per-account gating (see _check_rep). Its own counter and
+                # The other face of per-account gating (see _check_rep), and any other error
+                # that came back without content (NoContentError). Its own counter and
                 # message: if every account answers this way, X is failing the query itself,
                 # and that has to surface as an error -- not as an empty result.
                 timeline_failed += 1
                 if timeline_failed > TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
-                        f"{self.queue}: no timeline (Internal server error) from "
-                        f"{timeline_failed} accounts in a row -- X is failing this query"
+                        f"{self.queue}: an error and no content from {timeline_failed} accounts "
+                        f"in a row -- X is failing this query. Last: {e}"
                     ) from None
-                logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
+                if isinstance(e, NoContentError):
+                    # WARNING, not INFO: a message no check names yet. Worth reading.
+                    logger.warning(f"Error with no content, parking on {self.queue}: {e}")
+                else:
+                    logger.info(f"Timeline Internal server error, parking on {self.queue}: {e}")
                 await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
                 continue
             except TxIdRejectedError:

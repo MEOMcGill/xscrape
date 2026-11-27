@@ -338,3 +338,108 @@ async def test_no_active_account_raises(client_fixture: CF):
     with pytest.raises(NoAccountError):
         async with client:
             await client.get(URL)
+
+
+# -- any error that comes back without content is a failure, whatever it says -------------
+
+# A made-up message: the rule must not depend on the wording.
+UNKNOWN_EMPTY = {
+    "data": {"search_by_raw_query": {"search_timeline": {}}},
+    "errors": [{"code": 999, "message": "SomethingNew: nobody has seen this one"}],
+}
+
+
+async def test_unknown_error_without_content_parks_account_and_uses_next(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}  # parked on this queue, not deactivated
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_unknown_error_without_content_from_every_account_fails_loudly(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 1)
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+    httpx_mock.add_response(url=URL, json=UNKNOWN_EMPTY, status_code=200)
+
+    with pytest.raises(EndpointRejectedError, match="SomethingNew"):
+        async with client:
+            await client.get(URL)
+
+
+async def test_error_on_timeline_path_with_user_around_it_is_a_failure(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """A user timeline keeps the user object around the missing timeline, so `data` is not
+    empty -- the error's path is what says the timeline failed."""
+    pool, client = client_fixture
+    body = {
+        "data": {"user": {"result": {"__typename": "User", "timeline": {}}}},
+        "errors": [{"message": "Timeout: Unspecified", "path": ["user", "result", "timeline"]}],
+    }
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}
+
+
+async def test_error_with_content_is_kept(httpx_mock: HTTPXMock, client_fixture: CF):
+    """A partial error (here: a protected quoted tweet) with the main content present is
+    not a failure: keep the response."""
+    pool, client = client_fixture
+    body = {
+        "data": {"tweetResult": {"result": {"__typename": "Tweet", "rest_id": "1"}}},
+        "errors": [{"message": "Authorization: Denied by access control", "path": ["quoted"]}],
+    }
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == body
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_empty_timeline_with_an_error_is_an_answer():
+    """`"instructions": []` is X saying "no results": content, not a failure."""
+    from twscrape.queue_client import _failed_without_content
+
+    empty_search = {
+        "data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": []}}}},
+        "errors": [{"message": "SomethingNew", "path": ["x"]}],
+    }
+    assert not _failed_without_content(empty_search)
+    assert _failed_without_content(UNKNOWN_EMPTY)
+    assert not _failed_without_content({"data": {}})  # no error: a plain empty answer
+
+
+async def test_missing_status_is_a_genuine_not_found(httpx_mock: HTTPXMock, client_fixture: CF):
+    """The allowlist: a deleted tweet answers with an error and no data, and that is the
+    true answer, so no account is parked and no retry happens."""
+    pool, client = client_fixture
+    body = {"data": {}, "errors": [{"message": "_Missing: No status found with that ID"}]}
+    httpx_mock.add_response(url=URL, json=body, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep.json() == body
