@@ -252,3 +252,89 @@ async def test_timeline_internal_error_from_every_account_fails_loudly(
     with pytest.raises(EndpointRejectedError, match="Internal server error"):
         async with client:
             await client.get(URL)
+
+
+# -- a request X never answered must raise, never come back as an empty result -----------
+
+
+async def test_xclid_failure_raises_instead_of_returning_empty(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    """2026-11-04: the transaction-id generator could not be built, every request was
+    aborted, and each query came back as "no results". It must raise."""
+    import pytest
+
+    from twscrape.pacer import RequestAbortedError
+    from twscrape.queue_client import AbortReqError, XClIdGenStore
+
+    pool, client = client_fixture
+
+    async def broken_get(cls, username, cookies=None, fresh=False):
+        raise AbortReqError("Failed to create XClIdGen")
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(broken_get))
+
+    with pytest.raises(RequestAbortedError, match="XClIdGen"):
+        async with client:
+            await client.get(URL)
+
+
+# What a search-refused account sent (meo-airflow#346, 2026-11-24).
+PRODUCT_DISABLED = {
+    "errors": [
+        {
+            "code": -1,
+            "message": "InvalidArgument: ProductDisabled: Closed gate stopped execution of the "
+            "pipeline (LatestTabSrpProduct)",
+        }
+    ]
+}
+
+
+async def test_product_disabled_parks_account_and_uses_next(
+    httpx_mock: HTTPXMock, client_fixture: CF
+):
+    """It fell through to "API unknown error" and ended the search as an empty page."""
+    pool, client = client_fixture
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+    httpx_mock.add_response(url=URL, json={"foo": "bar"}, status_code=200)
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"foo": "bar"}
+    assert await get_locked(pool) == {"user1"}  # parked on this queue, not deactivated
+    assert {a.username for a in await pool.get_all() if a.active} == {"user1", "user2"}
+
+
+async def test_product_disabled_from_every_account_fails_loudly(
+    httpx_mock: HTTPXMock, client_fixture: CF, monkeypatch
+):
+    import pytest
+
+    from twscrape import queue_client
+    from twscrape.pacer import EndpointRejectedError
+
+    pool, client = client_fixture
+    monkeypatch.setattr(queue_client, "TID_404_MAX_ACCOUNTS", 1)
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+    httpx_mock.add_response(url=URL, json=PRODUCT_DISABLED, status_code=200)
+
+    with pytest.raises(EndpointRejectedError, match="ProductDisabled"):
+        async with client:
+            await client.get(URL)
+
+
+async def test_no_active_account_raises(client_fixture: CF):
+    """With no active account the request returned None, i.e. an empty result."""
+    import pytest
+
+    from twscrape.accounts_pool import NoAccountError
+
+    pool, client = client_fixture
+    for name in ("user1", "user2"):
+        await pool.set_active(name, False)
+
+    with pytest.raises(NoAccountError):
+        async with client:
+            await client.get(URL)

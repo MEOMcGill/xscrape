@@ -18,6 +18,7 @@ from twscrape import (
     HttpStatusError,
     NetworkError,
     NoAccountError,
+    RequestAbortedError,
     RequestStats,
     Response,
     gather,

@@ -5,13 +5,14 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from .accounts_pool import Account, AccountsPool
+from .accounts_pool import Account, AccountsPool, NoAccountError
 from .http import ConnectError, HttpClient, HttpMethod, HttpStatusError, NetworkError, Response
 from .logger import logger
 from .pacer import (
     CloudflareBackoff,
     CloudflareBlockedError,
     EndpointRejectedError,
+    RequestAbortedError,
     RequestPacer,
     RequestStats,
 )
@@ -33,11 +34,25 @@ TID_404_MAX_ACCOUNTS = 5
 # logged-out page, the problem is not those accounts.
 XCLID_ACCOUNT_MAX = 5
 
+# An account X answers with "ProductDisabled: Closed gate" is parked this long on that
+# queue. Longer than the gated-404 park: in the 2026-11-24/25 qc_election snap crawl the
+# gate held on its accounts for about 13 hours, and the accounts came back every ~15
+# minutes to be refused another 50 times (8,656 refusals). Not much longer, because
+# while every account is parked the pool waits for the first to come back instead of
+# failing, and that wait should not stall a run for half a day.
+REFUSED_LOCK_SECONDS = 60 * 60
+
 
 class HandledError(Exception): ...
 
 
-class AbortReqError(Exception): ...
+class AbortReqError(Exception):
+    """Internal: give up on this request. req() re-raises it as RequestAbortedError."""
+
+
+class AccountRefusedError(Exception):
+    """X refused this account this endpoint ("ProductDisabled: Closed gate"). The
+    account may still work elsewhere, so it is parked on this queue only."""
 
 
 class TxIdRejectedError(Exception):
@@ -141,8 +156,9 @@ class XClIdGenStore:
                 logger.warning("XClIdGen refresh failed; falling back to cached key")
                 return cls._gen
 
-            # ERROR, not WARNING: from here every request is aborted and the caller sees an
-            # empty result, which on 2026-11-04 let a whole nightly run "succeed" with 0 tweets.
+            # From here every request is aborted. It used to reach the caller as an empty
+            # result, which on 2026-11-04 let a whole nightly run "succeed" with 0 tweets;
+            # req() now raises it as RequestAbortedError.
             logger.error("XClIdGen creation failed 3 times; aborting the request")
             raise AbortReqError(
                 "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
@@ -307,7 +323,9 @@ class QueueClient:
             logger.warning(f"Blocked by {src}: {rep.status_code} - {req_id(rep)}")
             if src == "Cloudflare":
                 raise CloudflareBlockSignal()
-            raise AbortReqError()
+            raise AbortReqError(
+                f"blocked by an HTML error page: {rep.status_code} - {req_id(rep)}"
+            )
 
         try:
             res = rep.json()
@@ -373,7 +391,7 @@ class QueueClient:
                 err_msg = "OK"
             else:
                 logger.warning(f"Dependency error (request skipped): {err_msg}")
-                raise AbortReqError()
+                raise AbortReqError(f"dependency error with no data: {log_msg}")
 
         # A search-gated account does not always answer with the empty 404. About as often it
         # answers 200 with
@@ -387,6 +405,16 @@ class QueueClient:
         # it gets the gated-404 treatment: park this account on this queue, retry elsewhere.
         if rep.status_code == 200 and _timeline_failed(res):
             raise TimelineFailedError(log_msg)
+
+        # "(-1) InvalidArgument: ProductDisabled: Closed gate stopped execution of the
+        # pipeline (LatestTabSrp...)": X refuses this account Latest search. It fell
+        # through to "API unknown error" below and was passed on as an empty page, so the
+        # query ended with no results. In the 2026-11-24/25 qc_election snap crawl, 62
+        # accounts were refused 8,656 times, and 11,711 of 13,521 keyword units saved 0
+        # tweets (meo-airflow#346). Park the account on this queue and retry the query on
+        # the next one.
+        if "ProductDisabled" in err_msg:
+            raise AccountRefusedError(log_msg)
 
         # content not found
         if rep.status_code == 200 and "_Missing: No status found with that ID" in err_msg:
@@ -413,12 +441,14 @@ class QueueClient:
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
         unknown_retry, connection_retry, cf_retry, tid_404, xclid_acc = 0, 0, 0, 0, 0
-        timeline_failed = 0
+        timeline_failed, refused = 0, 0
 
         while True:
             ctx = await self._get_ctx()  # not need to close client, class implements __aexit__
             if ctx is None:
-                return None
+                # The pool has no active account at all (get_for_queue_or_wait already
+                # waits out locks). Returning None here ended the query as "no results".
+                raise NoAccountError(f"No active accounts for queue {self.queue}")
 
             try:
                 # Cloudflare blocks are per-IP, so all requests share one backoff
@@ -486,9 +516,22 @@ class QueueClient:
                 logger.warning(f"{e}; username={ctx.acc.username}; queue={self.queue}")
                 await self._close_ctx(utc.ts() + 60 * 15)
                 continue
-            except AbortReqError:
-                # abort all queries
-                return
+            except AccountRefusedError as e:
+                # Same shape as the gated 404: park on this queue, take the next account, and
+                # past a run of refusals say that X is refusing the pool, not one account.
+                refused += 1
+                if refused > TID_404_MAX_ACCOUNTS:
+                    raise EndpointRejectedError(
+                        f"{self.queue}: ProductDisabled (closed gate) from {refused} accounts "
+                        "in a row -- X is refusing this endpoint to the pool"
+                    ) from None
+                logger.warning(f"Account refused, parking on {self.queue}: {e}")
+                await self._close_ctx(utc.ts() + REFUSED_LOCK_SECONDS)
+                continue
+            except AbortReqError as e:
+                # Raise, never return: a bare return here reached the caller as an empty
+                # result, indistinguishable from "X found nothing" (see RequestAbortedError).
+                raise RequestAbortedError(f"{self.queue}: {e}") from None
             except HandledError:
                 # retry with new account
                 continue
