@@ -23,24 +23,23 @@ ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
 
-# A gated account is parked this long before search retries it. Short enough to recover on
-# its own if X lifts the restriction, long enough not to re-burn a request (and three
-# transaction-id attempts) on a permanently gated account every few seconds.
+# A gated "Internal server error" (and any other error with no content) parks the account
+# on that queue this long. The empty 404 and ProductDisabled suspend it there instead.
 TID_404_LOCK_SECONDS = 60 * 15
-# Past this many consecutive gated accounts, stop blaming the accounts and say so.
+# At this many consecutive refused accounts, the query fails (EndpointRejectedError).
 TID_404_MAX_ACCOUNTS = 5
 
 # Same idea for XClIdAccountError: past this many accounts in a row whose cookies get the
 # logged-out page, the problem is not those accounts.
 XCLID_ACCOUNT_MAX = 5
 
-# An account X answers with "ProductDisabled: Closed gate" is parked this long on that
-# queue. Longer than the gated-404 park: in the 2026-11-24/25 qc_election snap crawl the
-# gate held on its accounts for about 13 hours, and the accounts came back every ~15
-# minutes to be refused another 50 times (8,656 refusals). Not much longer, because
-# while every account is parked the pool waits for the first to come back instead of
-# failing, and that wait should not stall a run for half a day.
-REFUSED_LOCK_SECONDS = 60 * 60
+# An account X refuses an endpoint -- empty 404, or 200 "ProductDisabled: Closed gate" -- is
+# suspended on that endpoint (queue) for good (AccountsPool.suspend, lock value -1), never
+# deactivated: its other endpoints still work. Measured 2026-11-27: 79 of 86 pool accounts
+# suspended by X since 11-21, every one still serving timelines, and answering search with
+# one of those two. Short parks sent them back to be refused all week (8,656 ProductDisabled
+# refusals in one crawl, 11-24/25). Once every account is suspended on an endpoint, the
+# pool's "no active accounts" check stops the query instead of waiting.
 
 
 class HandledError(Exception): ...
@@ -300,7 +299,9 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self, reset_at=-1, inactive=False, msg: str | None = None, suspend: bool = False
+    ):
         if self.ctx is None:
             return
 
@@ -310,6 +311,10 @@ class QueueClient:
 
         if inactive:
             await self.pool.mark_inactive(username, msg)
+            return
+
+        if suspend:  # off this queue for good; see AccountsPool.suspend
+            await self.pool.suspend(username, self.queue, ctx.req_count)
             return
 
         if reset_at > 0:
@@ -532,7 +537,7 @@ class QueueClient:
                 # message: if every account answers this way, X is failing the query itself,
                 # and that has to surface as an error -- not as an empty result.
                 timeline_failed += 1
-                if timeline_failed > TID_404_MAX_ACCOUNTS:
+                if timeline_failed >= TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
                         f"{self.queue}: an error and no content from {timeline_failed} accounts "
                         f"in a row -- X is failing this query. Last: {e}"
@@ -551,13 +556,20 @@ class QueueClient:
                 # query aborted on the first gated account -- and since the pool hands out
                 # accounts least-recently-used first, one gated account at the head of the
                 # queue silently zeroed every search.
+                #
+                # Suspended on this endpoint right away (see SUSPENDED_ON_QUEUE above). An empty
+                # 404 from many accounts can also mean the operation id went stale (a few
+                # times a year); that is checked by hand, and whoever updates the op id clears
+                # the suspensions (`twscrape reset_locks`).
                 tid_404 += 1
-                if tid_404 > TID_404_MAX_ACCOUNTS:
+                logger.warning(f"Empty 404, suspended on {self.queue}: {ctx.acc.username}")
+                await self._close_ctx(suspend=True)
+                if tid_404 >= TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
-                        f"{self.queue}: empty 404 from {tid_404} accounts in a row -- "
-                        "the operation id is probably stale, not the accounts"
+                        f"{self.queue}: empty 404 from {tid_404} accounts in a row, each "
+                        "suspended on it -- the accounts are gated or suspended by X, or the "
+                        "operation id is stale (check the request format if this keeps happening)"
                     ) from None
-                await self._close_ctx(utc.ts() + TID_404_LOCK_SECONDS)
                 continue
             except XClIdAccountError as e:
                 # X served this account the logged-out app: its session did not authenticate
@@ -572,16 +584,17 @@ class QueueClient:
                 await self._close_ctx(utc.ts() + 60 * 15)
                 continue
             except AccountRefusedError as e:
-                # Same shape as the gated 404: park on this queue, take the next account, and
-                # past a run of refusals say that X is refusing the pool, not one account.
+                # X names the refusal ("ProductDisabled"): suspend the account on this queue
+                # right away, take the next account, and at a run of refusals say that X is
+                # refusing this endpoint to the pool.
                 refused += 1
-                if refused > TID_404_MAX_ACCOUNTS:
+                logger.warning(f"Account refused, suspended on {self.queue}: {e}")
+                await self._close_ctx(suspend=True)
+                if refused >= TID_404_MAX_ACCOUNTS:
                     raise EndpointRejectedError(
                         f"{self.queue}: ProductDisabled (closed gate) from {refused} accounts "
                         "in a row -- X is refusing this endpoint to the pool"
                     ) from None
-                logger.warning(f"Account refused, parking on {self.queue}: {e}")
-                await self._close_ctx(utc.ts() + REFUSED_LOCK_SECONDS)
                 continue
             except AbortReqError as e:
                 # Raise, never return: a bare return here reached the caller as an empty

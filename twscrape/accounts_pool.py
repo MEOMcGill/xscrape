@@ -17,6 +17,10 @@ class NoAccountError(Exception):
     pass
 
 
+# The lock value that marks an account suspended on one endpoint (queue). See suspend().
+SUSPENDED_ON_QUEUE = -1
+
+
 class AccountInfo(TypedDict):
     username: str
     logged_in: bool
@@ -280,6 +284,20 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
+    async def suspend(self, username: str, queue: str, req_count=0):
+        """Take the account off one endpoint for good: its lock on `queue` becomes -1, which
+        never expires. X refuses suspended and search-gated accounts an endpoint (empty 404,
+        or 200 "ProductDisabled") while their other endpoints keep working, so the account
+        stays active. Cleared only by hand (`twscrape reset_locks` clears every lock)."""
+        qs = f"""
+        UPDATE accounts SET
+            locks = json_set(locks, '$.{queue}', {SUSPENDED_ON_QUEUE}),
+            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
+            last_used = datetime({utc.ts()}, 'unixepoch')
+        WHERE username = :username
+        """
+        await execute(self._db_file, qs, {"username": username})
+
     async def unlock(self, username: str, queue: str, req_count=0):
         qs = f"""
         UPDATE accounts SET
@@ -337,7 +355,10 @@ class AccountsPool:
         WHERE active = true AND (
             locks IS NULL
             OR json_extract(locks, '$.{queue}') IS NULL
-            OR json_extract(locks, '$.{queue}') < datetime('now')
+            -- a datetime lock that has expired; never the -1 of a suspension (an integer
+            -- sorts before any text in sqlite, so a plain "< now" would let it through)
+            OR (json_type(locks, '$.{queue}') = 'text'
+                AND json_extract(locks, '$.{queue}') < datetime('now'))
         )
         ORDER BY {self._order_by}
         LIMIT 1
@@ -353,12 +374,17 @@ class AccountsPool:
                 if self._raise_when_no_account or get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT"):
                     raise NoAccountError(f"No account available for queue {queue}")
 
-                if not msg_shown:
-                    nat = await self.next_available_at(queue)
-                    if not nat:
-                        logger.warning("No active accounts. Stopping...")
-                        return None
+                # Re-checked on every pass, not only the first: while we wait, the accounts
+                # we are waiting for can be suspended on this queue by other queries.
+                nat = await self.next_available_at(queue)
+                if not nat:
+                    logger.warning(
+                        f'No active accounts for queue "{queue}" (all inactive or suspended '
+                        "on it). Stopping..."
+                    )
+                    return None
 
+                if not msg_shown:
                     msg = f'No account available for queue "{queue}". Next available at {nat}'
                     logger.info(msg)
                     msg_shown = True
@@ -375,7 +401,9 @@ class AccountsPool:
         qs = f"""
         SELECT json_extract(locks, '$."{queue}"') as lock_until
         FROM accounts
-        WHERE active = true AND json_extract(locks, '$."{queue}"') IS NOT NULL
+        -- datetime locks only: a suspended account (-1) never becomes available, so if
+        -- nothing else is left this returns None and the caller stops
+        WHERE active = true AND json_type(locks, '$."{queue}"') = 'text'
         ORDER BY lock_until ASC
         LIMIT 1
         """
